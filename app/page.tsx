@@ -34,6 +34,8 @@ export default function Home() {
   const [arrayBuffer, setArrayBuffer] = useState<ArrayBuffer | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [zoom, setZoom] = useState(1.2);
+  // Páginas escolhidas para quantificar (relevante quando o PDF tem várias).
+  const [selectedPages, setSelectedPages] = useState<number[]>([]);
 
   // Escala: denominador 1:N e/ou fator calibrado pela linha desenhada.
   const [scaleDen, setScaleDen] = useState(100);
@@ -75,6 +77,8 @@ export default function Home() {
       const data: UploadResult = await resp.json();
       setDocId(data.docId);
       setPages(data.pages);
+      // Por padrão seleciona a 1ª página; o usuário ajusta se houver várias.
+      setSelectedPages(data.pages.length > 0 ? [0] : []);
       if (!projectName || projectName === "Projeto") {
         setProjectName(data.fileName.replace(/\.pdf$/i, "") || "Projeto");
       }
@@ -92,13 +96,19 @@ export default function Home() {
       setErro("Defina uma escala válida (1:N ou calibre pela linha).");
       return;
     }
+    if (pages.length > 1 && selectedPages.length === 0) {
+      setErro("Selecione ao menos uma página para quantificar.");
+      return;
+    }
     setErro(null);
     setOcupado(true);
     try {
+      const pageIndices =
+        pages.length > 1 ? [...selectedPages].sort((a, b) => a - b) : undefined;
       const resp = await fetch("/api/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ docId, metersPerUnit }),
+        body: JSON.stringify({ docId, metersPerUnit, pageIndices }),
       });
       if (!resp.ok) {
         const j = await resp.json().catch(() => null);
@@ -220,10 +230,14 @@ export default function Home() {
         <button
           type="button"
           onClick={handleProcess}
-          disabled={!docId || ocupado}
+          disabled={!docId || ocupado || (pages.length > 1 && selectedPages.length === 0)}
           className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
         >
-          {ocupado ? "Lendo…" : "Ler todas as páginas"}
+          {ocupado
+            ? "Lendo…"
+            : pages.length > 1
+              ? `Quantificar ${selectedPages.length} página(s)`
+              : "Ler a página"}
         </button>
 
         <button
@@ -239,6 +253,60 @@ export default function Home() {
       {erro && (
         <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
           {erro}
+        </div>
+      )}
+
+      {/* Seleção de páginas (somente quando o PDF tem mais de uma) */}
+      {pages.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-sm">
+          <span className="font-medium text-slate-700">
+            Em quais páginas está o projeto?
+          </span>
+          {pages.map((p) => {
+            const sel = selectedPages.includes(p.index);
+            return (
+              <button
+                key={p.index}
+                type="button"
+                onClick={() => {
+                  setSelectedPages((prev) =>
+                    prev.includes(p.index)
+                      ? prev.filter((i) => i !== p.index)
+                      : [...prev, p.index],
+                  );
+                  setPageIndex(p.index); // também pré-visualiza a página
+                }}
+                className={
+                  "rounded border px-2 py-1 " +
+                  (sel
+                    ? "border-emerald-600 bg-emerald-600 text-white"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50") +
+                  (p.index === pageIndex ? " ring-2 ring-blue-400" : "")
+                }
+                title={p.isVector ? "Página vetorial" : "Página raster/escaneada"}
+              >
+                {p.index + 1}
+              </button>
+            );
+          })}
+          <span className="mx-1 text-slate-300">|</span>
+          <button
+            type="button"
+            onClick={() => setSelectedPages(pages.map((p) => p.index))}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:bg-slate-50"
+          >
+            Todas
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedPages([])}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:bg-slate-50"
+          >
+            Limpar
+          </button>
+          <span className="text-xs text-slate-500">
+            {selectedPages.length} selecionada(s)
+          </span>
         </div>
       )}
 
