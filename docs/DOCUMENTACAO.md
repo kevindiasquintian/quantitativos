@@ -45,7 +45,24 @@ lib/sinapi.ts                # tabela de referência de custos SINAPI
 lib/ifcXlsx.ts               # montagem da planilha (exceljs)
 ```
 
-## 4. Fluxo de dados
+## 4. Metodologia de desenvolvimento com agentes de IA
+
+O projeto foi desenvolvido com o apoio de **agentes de IA especializados**,
+cada um responsável por uma frente do trabalho, simulando um time de software
+multidisciplinar:
+
+| Agente | Papel | Responsabilidades |
+|---|---|---|
+| **Agente de Backend** | Desenvolvimento server-side | Parser do IFC, endpoints da API (`/api/ifc`, `/api/ifc/export`), normalização de unidades e geração da planilha. |
+| **Agente de Frontend** | Interface e experiência | UI em Next.js/Tailwind, visualizador 3D, tabela editável, fonte de custos e identidade visual. |
+| **Agente de QA** | Qualidade e validação | Verificação de tipos, testes com o modelo de referência, conferência de quantidades/unidades e revisão de regressões. |
+| **Agente Orçamentista** | Domínio de orçamento | Tradução dos elementos IFC em itens de serviço, critérios de engenharia (faces de parede, cobertura, estimativas) e mapeamento de preços SINAPI com unidades compatíveis. |
+
+Essa divisão por papéis permitiu separar claramente as preocupações técnicas
+(backend, frontend, QA) da regra de negócio de orçamentação, conduzida pelo
+**agente orçamentista**, que define como o modelo BIM se traduz em custos.
+
+## 5. Fluxo de dados
 
 1. **Upload** — o usuário seleciona um `.ifc` na interface.
 2. **Parse** (`POST /api/ifc`) — o arquivo é lido pelo parser STEP, que extrai os
@@ -58,7 +75,7 @@ lib/ifcXlsx.ts               # montagem da planilha (exceljs)
 5. **Visualização** — a tabela é exibida na web; o modelo aparece em 3D.
 6. **Exportação** (`POST /api/ifc/export`) — gera o `.xlsx` com os preços efetivos.
 
-## 5. Parser IFC (`lib/ifc.ts`)
+## 6. Parser IFC (`lib/ifc.ts`)
 
 O IFC segue o padrão **STEP / ISO-10303-21**. O parser implementado é leve e não
 usa WASM. Principais responsabilidades:
@@ -73,7 +90,7 @@ usa WASM. Principais responsabilidades:
   derivar a quantidade a partir da geometria (ex.: `IfcExtrudedAreaSolid` +
   `IfcRectangleProfileDef`).
 
-## 6. Regras de orçamento (`lib/budget.ts`)
+## 7. Regras de orçamento (`lib/budget.ts`)
 
 Os elementos IFC são convertidos em itens agrupados por etapa. Resumo:
 
@@ -99,7 +116,7 @@ Critérios de engenharia adotados:
 - Itens marcados como **(estimado)** derivam de premissas paramétricas (ex.:
   ~10 m² de fôrma por m³ de concreto, ~100 kg/m³ de armadura).
 
-## 7. Precificação SINAPI (`lib/sinapi.ts`)
+## 8. Precificação SINAPI (`lib/sinapi.ts`)
 
 O app oferece uma **Fonte de Custos** selecionável no topo:
 
@@ -118,7 +135,7 @@ item ao valor de referência.
 > `lib/sinapi.ts` conforme o mês/estado do orçamento.
 > https://www.caixa.gov.br/site/Paginas/downloads.aspx
 
-## 8. Exportação Excel (`lib/ifcXlsx.ts`)
+## 9. Exportação Excel (`lib/ifcXlsx.ts`)
 
 A planilha `.xlsx` é montada com **exceljs** e contém:
 
@@ -126,13 +143,13 @@ A planilha `.xlsx` é montada com **exceljs** e contém:
   total e critério/observação, com linha de total geral.
 - **Detalhe** — lista por elemento (tipo, nome, GUID, área, comprimento, volume).
 
-## 9. Visualizador 3D
+## 10. Visualizador 3D
 
 O modelo IFC é renderizado com **web-ifc**. Cada item do orçamento pode
 **destacar** no modelo os objetos paramétricos que originaram sua quantidade,
 facilitando a conferência visual do takeoff.
 
-## 10. Como executar
+## 11. Como executar
 
 ```bash
 npm install
@@ -149,13 +166,13 @@ Requer Node.js 18+ (testado com Node 24).
 3. Confira o modelo 3D e a planilha; ajuste a **Fonte de Custos** e os preços.
 4. Clique em **Exportar Excel**.
 
-## 11. Validação
+## 12. Validação
 
 Testado com o modelo **BasicHouse.ifc** (IFC2X3 exportado do Revit). As
 quantidades e os preços foram conferidos item a item, validando a compatibilidade
 de unidades entre o app e a referência SINAPI.
 
-## 12. Limitações e próximos passos
+## 13. Limitações e próximos passos
 
 - Quantificação **por elemento**, não por ambiente (o IFC de teste não traz
   `IfcSpace`). Suporte a área por cômodo pode ser adicionado quando houver
