@@ -191,11 +191,62 @@ export function quantify(input: QuantifyInput): ExtractionResult {
 //     curtos (hachuras/texto) para reduzir ruído. É aproximada por natureza.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Regex padrão para capturar a área anotada (grupo 1 = número, com , ou .). */
-const DEFAULT_AREA_REGEX = /(\d+(?:[.,]\d+)?)\s*m(?:²|2)?\b/i;
+// Regex de área: captura número + unidade. Aceita imperial (SF / sq ft) e
+// métrico (m² / m2). Grupo 1 = número; grupo 2 = unidade.
+const AREA_RE = /(\d[\d.,]*)\s*(sf|sq\.?\s?ft|m²|m2)\b/i;
+const SF_TO_M2 = 0.09290304; // 1 pé² em m²
 
-/** Comprimento mínimo (em metros) para um traço entrar na estimativa de parede. */
+/** Comprimento mínimo (m) para um traço ser considerado candidato a parede. */
 const WALL_MIN_LENGTH_M = 0.3;
+
+/** Converte um número textual métrico (vírgula ou ponto decimal) em number. */
+function toNumMetric(s: string): number {
+  const t = s.trim();
+  if (t.includes(",") && t.includes(".")) {
+    // o separador mais à direita é o decimal
+    return t.lastIndexOf(",") > t.lastIndexOf(".")
+      ? parseFloat(t.replace(/\./g, "").replace(",", "."))
+      : parseFloat(t.replace(/,/g, ""));
+  }
+  if (t.includes(",")) return parseFloat(t.replace(",", "."));
+  return parseFloat(t);
+}
+
+/** Converte um rótulo de área (valor + unidade) para m². */
+function areaToM2(valRaw: string, unit: string): number {
+  const u = unit.toLowerCase();
+  if (u.startsWith("m")) return toNumMetric(valRaw); // já em m²
+  // imperial: vírgula é separador de milhar
+  const v = parseFloat(valRaw.replace(/[,\s]/g, ""));
+  return v * SF_TO_M2;
+}
+
+/** Um texto é um bom nome de ambiente? (tem letras e não é cota/unidade/área) */
+function isRoomName(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  if (!/[A-Za-zÀ-ÿ]{2,}/.test(t)) return false; // precisa de letras
+  if (AREA_RE.test(t)) return false; // é rótulo de área
+  if (/['"]/.test(t)) return false; // cota em pés/polegadas
+  if (/^\d/.test(t)) return false; // começa com número (códigos/cotas)
+  return true;
+}
+
+/** Acha o nome de ambiente mais próximo de um rótulo de área. */
+function nearestName(areaItem: TextItem, texts: TextItem[]): string | null {
+  const origin: Point = { x: areaItem.x, y: areaItem.y };
+  let best: TextItem | null = null;
+  let bestDist = Infinity;
+  for (const t of texts) {
+    if (t === areaItem || !isRoomName(t.text)) continue;
+    const d = dist(origin, { x: t.x, y: t.y });
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return best ? best.text.trim() : null;
+}
 
 /**
  * Converte uma escala 1:N em metros por unidade de PDF.
@@ -208,6 +259,8 @@ export function scaleToMetersPerUnit(scaleDenominator: number): number {
 
 /**
  * Quantifica uma página em modo automático, recebendo apenas a escala.
+ * Áreas: rótulos SF (convertidos para m²) ou m². Paredes: estimativa pelo
+ * "estilo" (cor+espessura) dominante entre os traços longos.
  */
 export function quantifyAuto(input: {
   texts: TextItem[];
@@ -215,46 +268,77 @@ export function quantifyAuto(input: {
   meta: PageMeta;
   metersPerUnit: number;
 }): ExtractionResult {
-  const { texts, segments, meta, metersPerUnit } = input;
+  const { texts: rawTexts, segments: rawSegments, meta, metersPerUnit } = input;
   const calibration: Calibration = { pageIndex: meta.index, metersPerUnit };
 
-  // ----- ÁREAS (rótulos anotados) -----
+  // Muitos PDFs desenham texto/linhas em duplicata (sombra/realce). Deduplica
+  // por conteúdo+posição para não dobrar áreas e comprimentos.
+  const tSeen = new Set<string>();
+  const texts = rawTexts.filter((t) => {
+    const k = `${t.text}|${Math.round(t.x)}|${Math.round(t.y)}`;
+    if (tSeen.has(k)) return false;
+    tSeen.add(k);
+    return true;
+  });
+  const sSeen = new Set<string>();
+  const segments = rawSegments.filter((s) => {
+    const k = `${Math.round(s.x1)}|${Math.round(s.y1)}|${Math.round(s.x2)}|${Math.round(s.y2)}|${s.color}|${Math.round(s.width * 10)}`;
+    if (sSeen.has(k)) return false;
+    sSeen.add(k);
+    return true;
+  });
+
+  // ----- ÁREAS -----
   const rooms: RoomArea[] = [];
   texts.forEach((item) => {
-    const m = DEFAULT_AREA_REGEX.exec(item.text);
+    const m = AREA_RE.exec(item.text);
     if (!m) return;
-    const raw = (m[1] ?? "").replace(",", ".");
-    const areaM2 = parseFloat(raw);
+    const areaM2 = areaToM2(m[1] ?? "", m[2] ?? "");
     if (!Number.isFinite(areaM2) || areaM2 <= 0) return;
-
     const index = rooms.length;
-    const label =
-      nearestRoomLabel(item, texts, DEFAULT_AREA_REGEX) ??
-      `Ambiente ${index + 1}`;
     rooms.push({
       id: `room-${index}`,
-      label,
+      label: nearestName(item, texts) ?? `Ambiente ${index + 1}`,
       areaM2,
       source: "label",
       textPos: { x: item.x, y: item.y },
     });
   });
 
-  // ----- PAREDES (estimativa) -----
-  const wallSegments = segments.filter(
-    (s) => toMeters(segmentLengthUnits(s), calibration) >= WALL_MIN_LENGTH_M,
-  );
-  const totalLengthM = wallSegments.reduce(
-    (acc, s) => acc + toMeters(segmentLengthUnits(s), calibration),
-    0,
-  );
-  const walls: WallResult = { totalLengthM, segments: wallSegments };
+  // Remove áreas idênticas repetidas na mesma página (tabelas/legendas
+  // duplicadas no sheet). Mantém a 1ª ocorrência de cada valor.
+  const aSeen = new Set<string>();
+  const dedupRooms: RoomArea[] = [];
+  for (const r of rooms) {
+    const k = String(Math.round(r.areaM2 * 100));
+    if (aSeen.has(k)) continue;
+    aSeen.add(k);
+    dedupRooms.push({ ...r, id: `room-${dedupRooms.length}` });
+  }
+  rooms.length = 0;
+  rooms.push(...dedupRooms);
 
-  return {
-    pageIndex: meta.index,
-    rooms,
-    walls,
-    counts: [],
-    finishes: [],
+  // ----- PAREDES (estimativa pelo estilo dominante) -----
+  // Agrupa traços longos por (cor|espessura) e escolhe o grupo de maior
+  // comprimento total — heurística para isolar as linhas de parede do resto.
+  const buckets = new Map<string, { len: number; segs: Segment[] }>();
+  for (const s of segments) {
+    const len = toMeters(segmentLengthUnits(s), calibration);
+    if (len < WALL_MIN_LENGTH_M) continue;
+    const key = `${s.color}|${Math.round(s.width * 10) / 10}`;
+    const b = buckets.get(key) ?? { len: 0, segs: [] };
+    b.len += len;
+    b.segs.push(s);
+    buckets.set(key, b);
+  }
+  let best: { len: number; segs: Segment[] } | null = null;
+  for (const b of buckets.values()) {
+    if (!best || b.len > best.len) best = b;
+  }
+  const walls: WallResult = {
+    totalLengthM: best?.len ?? 0,
+    segments: best?.segs ?? [],
   };
+
+  return { pageIndex: meta.index, rooms, walls, counts: [], finishes: [] };
 }
