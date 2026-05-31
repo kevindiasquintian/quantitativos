@@ -181,3 +181,80 @@ export function quantify(input: QuantifyInput): ExtractionResult {
     finishes,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modo AUTOMÁTICO
+// O usuário informa apenas a escala. A partir dela calculamos metros por unidade
+// de PDF e quantificamos cada página sem premissas configuráveis:
+//   • áreas: lidas dos rótulos anotados no desenho (ex.: "Quarto 12,5 m²")
+//   • paredes: ESTIMATIVA = soma dos traços do desenho, descartando trechos muito
+//     curtos (hachuras/texto) para reduzir ruído. É aproximada por natureza.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Regex padrão para capturar a área anotada (grupo 1 = número, com , ou .). */
+const DEFAULT_AREA_REGEX = /(\d+(?:[.,]\d+)?)\s*m(?:²|2)?\b/i;
+
+/** Comprimento mínimo (em metros) para um traço entrar na estimativa de parede. */
+const WALL_MIN_LENGTH_M = 0.3;
+
+/**
+ * Converte uma escala 1:N em metros por unidade de PDF.
+ * 1 unidade de PDF = 1 ponto = 1/72 polegada no papel; em 1:N isso vira
+ * (1/72) * N polegadas reais = N * 0,0254/72 metros reais.
+ */
+export function scaleToMetersPerUnit(scaleDenominator: number): number {
+  return (scaleDenominator * 0.0254) / 72;
+}
+
+/**
+ * Quantifica uma página em modo automático, recebendo apenas a escala.
+ */
+export function quantifyAuto(input: {
+  texts: TextItem[];
+  segments: Segment[];
+  meta: PageMeta;
+  metersPerUnit: number;
+}): ExtractionResult {
+  const { texts, segments, meta, metersPerUnit } = input;
+  const calibration: Calibration = { pageIndex: meta.index, metersPerUnit };
+
+  // ----- ÁREAS (rótulos anotados) -----
+  const rooms: RoomArea[] = [];
+  texts.forEach((item) => {
+    const m = DEFAULT_AREA_REGEX.exec(item.text);
+    if (!m) return;
+    const raw = (m[1] ?? "").replace(",", ".");
+    const areaM2 = parseFloat(raw);
+    if (!Number.isFinite(areaM2) || areaM2 <= 0) return;
+
+    const index = rooms.length;
+    const label =
+      nearestRoomLabel(item, texts, DEFAULT_AREA_REGEX) ??
+      `Ambiente ${index + 1}`;
+    rooms.push({
+      id: `room-${index}`,
+      label,
+      areaM2,
+      source: "label",
+      textPos: { x: item.x, y: item.y },
+    });
+  });
+
+  // ----- PAREDES (estimativa) -----
+  const wallSegments = segments.filter(
+    (s) => toMeters(segmentLengthUnits(s), calibration) >= WALL_MIN_LENGTH_M,
+  );
+  const totalLengthM = wallSegments.reduce(
+    (acc, s) => acc + toMeters(segmentLengthUnits(s), calibration),
+    0,
+  );
+  const walls: WallResult = { totalLengthM, segments: wallSegments };
+
+  return {
+    pageIndex: meta.index,
+    rooms,
+    walls,
+    counts: [],
+    finishes: [],
+  };
+}

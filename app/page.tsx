@@ -1,24 +1,17 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Página principal (cliente). Orquestra o fluxo:
-//   1) upload do PDF (render local + POST /api/upload)
-//   2) visualização e navegação de páginas
-//   3) calibração de escala
-//   4) edição de premissas
-//   5) extração (POST /api/extract)
-//   6) revisão editável do resultado
-//   7) exportação da planilha (POST /api/export)
+// Página principal (cliente) — fluxo AUTOMÁTICO e simples:
+//   1) abrir o PDF
+//   2) informar SOMENTE a escala (1:N)
+//   3) um clique lê TODAS as páginas e retorna os quantitativos
+//   4) baixar a planilha
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import PdfViewer from "@/components/PdfViewer";
-import CalibrationTool from "@/components/CalibrationTool";
-import PremissasPanel from "@/components/PremissasPanel";
-import ReviewLayer from "@/components/ReviewLayer";
-import { defaultPremissas, type Premissas } from "@/lib/premissas";
+import { defaultPremissas } from "@/lib/premissas";
 import type {
-  Calibration,
   ExtractionResult,
   ExportPayload,
   PageMeta,
@@ -26,29 +19,22 @@ import type {
 } from "@/lib/types";
 
 export default function Home() {
-  // Estado do documento.
   const [projectName, setProjectName] = useState("Projeto");
   const [docId, setDocId] = useState<string | null>(null);
   const [pages, setPages] = useState<PageMeta[]>([]);
   const [arrayBuffer, setArrayBuffer] = useState<ArrayBuffer | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
-  const [scale, setScale] = useState(1.5);
+  const [zoom, setZoom] = useState(1.2);
 
-  // Estado de render/calibração.
-  const [renderScale, setRenderScale] = useState(1);
-  const [calibration, setCalibration] = useState<Calibration | null>(null);
+  // Única entrada do usuário: o denominador da escala (1:N).
+  const [scaleDen, setScaleDen] = useState(100);
 
-  // Premissas e resultado.
-  const [premissas, setPremissas] = useState<Premissas>(defaultPremissas);
-  const [resultado, setResultado] = useState<ExtractionResult | null>(null);
-
-  // UI.
+  const [results, setResults] = useState<ExtractionResult[] | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  const meta = pages[pageIndex];
+  const onRenderScale = useCallback(() => {}, []);
 
   // ── 1) Upload ────────────────────────────────────────────────────────────────
   async function handleUpload(file: File) {
@@ -58,8 +44,7 @@ export default function Home() {
       const buf = await file.arrayBuffer();
       setArrayBuffer(buf);
       setPageIndex(0);
-      setResultado(null);
-      setCalibration(null);
+      setResults(null);
 
       const fd = new FormData();
       fd.append("file", file);
@@ -74,58 +59,57 @@ export default function Home() {
         setProjectName(data.fileName.replace(/\.pdf$/i, "") || "Projeto");
       }
     } catch (e) {
-      setErro(
-        "Falha no upload: " + (e instanceof Error ? e.message : String(e)),
-      );
+      setErro("Falha no upload: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setOcupado(false);
     }
   }
 
-  // ── 5) Extração ───────────────────────────────────────────────────────────────
-  async function handleExtract() {
-    if (!docId || !calibration) return;
+  // ── 2+3) Processar TODAS as páginas (só a escala) ─────────────────────────────
+  async function handleProcess() {
+    if (!docId) return;
+    if (!Number.isFinite(scaleDen) || scaleDen <= 0) {
+      setErro("Informe uma escala válida, ex.: 50 para 1:50.");
+      return;
+    }
     setErro(null);
     setOcupado(true);
     try {
-      const resp = await fetch("/api/extract", {
+      const resp = await fetch("/api/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ docId, pageIndex, calibration, premissas }),
+        body: JSON.stringify({ docId, scaleDenominator: scaleDen }),
       });
       if (!resp.ok) {
-        throw new Error("Extração falhou (HTTP " + resp.status + ").");
+        const j = await resp.json().catch(() => null);
+        throw new Error(j?.error || "Processamento falhou (HTTP " + resp.status + ").");
       }
-      const data: ExtractionResult = await resp.json();
-      setResultado(data);
+      const data: { pages: ExtractionResult[] } = await resp.json();
+      setResults(data.pages);
     } catch (e) {
-      setErro(
-        "Falha na extração: " + (e instanceof Error ? e.message : String(e)),
-      );
+      setErro("Falha ao processar: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setOcupado(false);
     }
   }
 
-  // ── 7) Exportação ─────────────────────────────────────────────────────────────
+  // ── 4) Baixar planilha ────────────────────────────────────────────────────────
   async function handleExport() {
-    if (!resultado) return;
+    if (!results) return;
     setErro(null);
     setOcupado(true);
     try {
       const payload: ExportPayload = {
         projectName: projectName || "Projeto",
-        premissas,
-        pages: [resultado],
+        premissas: defaultPremissas,
+        pages: results,
       };
       const resp = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!resp.ok) {
-        throw new Error("Exportação falhou (HTTP " + resp.status + ").");
-      }
+      if (!resp.ok) throw new Error("Exportação falhou (HTTP " + resp.status + ").");
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -136,20 +120,27 @@ export default function Home() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setErro(
-        "Falha na exportação: " + (e instanceof Error ? e.message : String(e)),
-      );
+      setErro("Falha na exportação: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setOcupado(false);
     }
   }
 
-  const onRenderScale = useCallback((rs: number) => setRenderScale(rs), []);
+  // Totais agregados de todas as páginas.
+  const totalArea = results
+    ? results.reduce((a, p) => a + p.rooms.reduce((s, r) => s + r.areaM2, 0), 0)
+    : 0;
+  const totalWall = results
+    ? results.reduce((a, p) => a + p.walls.totalLengthM, 0)
+    : 0;
+  const totalRooms = results
+    ? results.reduce((a, p) => a + p.rooms.length, 0)
+    : 0;
 
   return (
     <main className="flex h-screen flex-col bg-slate-50">
       {/* Cabeçalho */}
-      <header className="flex items-center gap-4 border-b border-slate-200 bg-white px-4 py-3">
+      <header className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
         <h1 className="text-lg font-bold text-slate-800">Quantitativos</h1>
         <div className="flex items-center gap-2">
           <label className="text-sm text-slate-500">Projeto:</label>
@@ -160,6 +151,19 @@ export default function Home() {
             className="rounded border border-slate-300 px-2 py-1 text-sm"
           />
         </div>
+
+        {/* Escala — a única entrada do usuário */}
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium text-slate-700">Escala 1 :</label>
+          <input
+            type="number"
+            min={1}
+            value={scaleDen}
+            onChange={(e) => setScaleDen(Number(e.target.value))}
+            className="w-24 rounded border border-slate-300 px-2 py-1 text-sm"
+          />
+        </div>
+
         <label className="ml-auto cursor-pointer rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700">
           {docId ? "Trocar PDF" : "Abrir PDF"}
           <input
@@ -173,6 +177,24 @@ export default function Home() {
             }}
           />
         </label>
+
+        <button
+          type="button"
+          onClick={handleProcess}
+          disabled={!docId || ocupado}
+          className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+        >
+          {ocupado ? "Lendo…" : "Ler todas as páginas"}
+        </button>
+
+        <button
+          type="button"
+          onClick={handleExport}
+          disabled={!results || ocupado}
+          className="rounded border border-blue-600 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-40"
+        >
+          Baixar planilha
+        </button>
       </header>
 
       {erro && (
@@ -181,114 +203,109 @@ export default function Home() {
         </div>
       )}
 
-      {/* Corpo: viewer (esquerda) + painel (direita) */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Coluna do viewer */}
+        {/* Pré-visualização do PDF (apenas visual) */}
         <div className="flex flex-1 flex-col overflow-hidden">
           {arrayBuffer && pages.length > 0 ? (
-            <PdfViewer
-              fileData={arrayBuffer}
-              pages={pages}
-              pageIndex={pageIndex}
-              scale={scale}
-              onPageChange={setPageIndex}
-              onRenderScale={onRenderScale}
-              canvasRef={canvasRef}
-            >
-              {/* Overlay de revisão sobreposto ao canvas. */}
-              {resultado && canvasRef.current && (
-                <ReviewLayerOverlay
-                  result={resultado}
-                  renderScale={renderScale}
-                  pdfHeight={meta?.height ?? 0}
-                  canvasWidth={canvasRef.current.width}
-                  canvasHeight={canvasRef.current.height}
-                />
-              )}
-            </PdfViewer>
+            <>
+              <PdfViewer
+                fileData={arrayBuffer}
+                pages={pages}
+                pageIndex={pageIndex}
+                scale={zoom}
+                onPageChange={setPageIndex}
+                onRenderScale={onRenderScale}
+                canvasRef={canvasRef}
+              />
+              <div className="flex items-center gap-2 border-t border-slate-200 bg-white px-3 py-2 text-sm">
+                <span className="text-slate-500">Zoom:</span>
+                <button
+                  type="button"
+                  onClick={() => setZoom((s) => Math.max(0.25, s - 0.25))}
+                  className="rounded border border-slate-300 px-2"
+                >
+                  −
+                </button>
+                <span className="w-12 text-center">{Math.round(zoom * 100)}%</span>
+                <button
+                  type="button"
+                  onClick={() => setZoom((s) => Math.min(4, s + 0.25))}
+                  className="rounded border border-slate-300 px-2"
+                >
+                  +
+                </button>
+              </div>
+            </>
           ) : (
-            <div className="flex flex-1 items-center justify-center text-slate-400">
-              Abra um arquivo PDF para começar.
-            </div>
-          )}
-
-          {/* Controle de zoom */}
-          {arrayBuffer && (
-            <div className="flex items-center gap-2 border-t border-slate-200 bg-white px-3 py-2 text-sm">
-              <span className="text-slate-500">Zoom:</span>
-              <button
-                type="button"
-                onClick={() => setScale((s) => Math.max(0.25, s - 0.25))}
-                className="rounded border border-slate-300 px-2"
-              >
-                −
-              </button>
-              <span className="w-12 text-center">{Math.round(scale * 100)}%</span>
-              <button
-                type="button"
-                onClick={() => setScale((s) => Math.min(4, s + 0.25))}
-                className="rounded border border-slate-300 px-2"
-              >
-                +
-              </button>
+            <div className="flex flex-1 items-center justify-center px-6 text-center text-slate-400">
+              Abra um PDF, informe a escala e clique em “Ler todas as páginas”.
             </div>
           )}
         </div>
 
-        {/* Painel lateral */}
-        <aside className="w-[420px] shrink-0 space-y-4 overflow-auto border-l border-slate-200 bg-slate-50 p-4">
-          {docId && meta && (
-            <CalibrationTool
-              pageIndex={pageIndex}
-              renderScale={renderScale}
-              canvasEl={canvasRef.current}
-              calibration={calibration}
-              onCalibrate={setCalibration}
-            />
+        {/* Resultados */}
+        <aside className="w-[460px] shrink-0 overflow-auto border-l border-slate-200 bg-white p-4">
+          {!results && (
+            <p className="text-sm text-slate-500">
+              Os quantitativos aparecem aqui depois de ler o PDF.
+            </p>
           )}
 
-          {docId && (
-            <PremissasPanel premissas={premissas} onChange={setPremissas} />
-          )}
-
-          {docId && (
-            <div className="space-y-2">
-              <button
-                type="button"
-                onClick={handleExtract}
-                disabled={!calibration || ocupado}
-                className="w-full rounded bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
-                title={!calibration ? "Calibre a escala antes de extrair." : undefined}
-              >
-                Extrair quantitativos
-              </button>
-              {!calibration && (
-                <p className="text-xs text-amber-600">
-                  Calibre a escala da página antes de extrair.
+          {results && (
+            <div className="space-y-5">
+              {/* Resumo geral */}
+              <section>
+                <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-slate-500">
+                  Resumo
+                </h2>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <Card label="Ambientes" value={String(totalRooms)} />
+                  <Card label="Área total" value={`${totalArea.toFixed(2)} m²`} />
+                  <Card label="Paredes (est.)" value={`${totalWall.toFixed(2)} m`} />
+                </div>
+                <p className="mt-2 text-xs text-slate-400">
+                  Áreas lidas dos rótulos do desenho. Paredes são estimativa a partir
+                  das linhas, na escala 1:{scaleDen}.
                 </p>
-              )}
-            </div>
-          )}
+              </section>
 
-          {resultado && (
-            <>
-              <ReviewLayer
-                result={resultado}
-                onChange={setResultado}
-                renderScale={renderScale}
-                pdfHeight={meta?.height ?? 0}
-                canvasWidth={0}
-                canvasHeight={0}
-              />
-              <button
-                type="button"
-                onClick={handleExport}
-                disabled={ocupado}
-                className="w-full rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40"
-              >
-                Baixar planilha
-              </button>
-            </>
+              {/* Detalhe por página */}
+              {results.map((p) => {
+                const areaPg = p.rooms.reduce((s, r) => s + r.areaM2, 0);
+                return (
+                  <section key={p.pageIndex}>
+                    <h3 className="mb-1 text-sm font-semibold text-slate-700">
+                      Página {p.pageIndex + 1}
+                      <span className="ml-2 font-normal text-slate-400">
+                        {areaPg.toFixed(2)} m² · {p.walls.totalLengthM.toFixed(2)} m de parede
+                      </span>
+                    </h3>
+                    {p.rooms.length === 0 ? (
+                      <p className="text-xs text-slate-400">
+                        Nenhuma área anotada encontrada nesta página.
+                      </p>
+                    ) : (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-slate-500">
+                            <th className="py-1">Ambiente</th>
+                            <th className="py-1 text-right">Área (m²)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {p.rooms.map((r) => (
+                            <tr key={r.id} className="border-t border-slate-100">
+                              <td className="py-1">{r.label}</td>
+                              <td className="py-1 text-right">{r.areaM2.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
           )}
         </aside>
       </div>
@@ -296,66 +313,11 @@ export default function Home() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Overlay de revisão desenhado sobre o canvas (pontos de ambientes e contagens).
-// As tabelas editáveis ficam no painel lateral via ReviewLayer; aqui só o desenho.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function ReviewLayerOverlay({
-  result,
-  renderScale,
-  pdfHeight,
-  canvasWidth,
-  canvasHeight,
-}: {
-  result: ExtractionResult;
-  renderScale: number;
-  pdfHeight: number;
-  canvasWidth: number;
-  canvasHeight: number;
-}) {
-  const ref = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const cv = ref.current;
-    if (!cv) return;
-    cv.width = canvasWidth;
-    cv.height = canvasHeight;
-    const ctx = cv.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, cv.width, cv.height);
-
-    const toPx = (x: number, y: number): [number, number] => [
-      x * renderScale,
-      (pdfHeight - y) * renderScale,
-    ];
-
-    ctx.fillStyle = "rgba(37, 99, 235, 0.85)";
-    ctx.font = "11px sans-serif";
-    for (const r of result.rooms) {
-      if (!r.textPos) continue;
-      const [px, py] = toPx(r.textPos.x, r.textPos.y);
-      ctx.beginPath();
-      ctx.arc(px, py, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillText(r.label || r.id, px + 7, py + 3);
-    }
-
-    ctx.fillStyle = "rgba(220, 38, 38, 0.85)";
-    for (const c of result.counts) {
-      for (const p of c.positions ?? []) {
-        const [px, py] = toPx(p.x, p.y);
-        ctx.beginPath();
-        ctx.arc(px, py, 4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }, [result, renderScale, pdfHeight, canvasWidth, canvasHeight]);
-
+function Card({ label, value }: { label: string; value: string }) {
   return (
-    <canvas
-      ref={ref}
-      className="pointer-events-none absolute left-0 top-0"
-    />
+    <div className="rounded border border-slate-200 bg-slate-50 px-2 py-3">
+      <div className="text-lg font-bold text-slate-800">{value}</div>
+      <div className="text-xs text-slate-500">{label}</div>
+    </div>
   );
 }
