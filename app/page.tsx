@@ -10,6 +10,7 @@
 
 import { useMemo, useState } from "react";
 import dynamic from "next/dynamic";
+import { sinapiPrice, sinapiRef, type CostSource } from "@/lib/sinapi";
 
 const IfcViewer = dynamic(() => import("@/components/IfcViewer"), { ssr: false });
 
@@ -52,6 +53,25 @@ export default function Home() {
   const [result, setResult] = useState<IfcResult | null>(null);
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
+  const [costSource, setCostSource] = useState<CostSource>("SINAPI");
+
+  // Item "sobrescrito": o usuário digitou um preço próprio, sobrepondo o SINAPI.
+  const isOverridden = (codigo: string) => prices[codigo] !== undefined;
+  // Volta o item à referência SINAPI (remove o preço manual).
+  const resetToSinapi = (codigo: string) =>
+    setPrices((p) => {
+      const { [codigo]: _, ...rest } = p;
+      return rest;
+    });
+
+  // Preço efetivo: preço manual tem prioridade; senão, no modo SINAPI usa a
+  // referência; no modo usuário, fica zero.
+  const effPrice = (codigo: string) =>
+    isOverridden(codigo)
+      ? prices[codigo]
+      : costSource === "SINAPI"
+        ? sinapiPrice(codigo)
+        : 0;
   const [erro, setErro] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // item do orçamento atualmente destacado no viewer
@@ -89,11 +109,11 @@ export default function Home() {
     setBusy(true);
     setErro(null);
     try {
-      const items = result.items.map((it) => ({ ...it, precoUnitario: prices[it.codigo] ?? 0 }));
+      const items = result.items.map((it) => ({ ...it, precoUnitario: effPrice(it.codigo) }));
       const resp = await fetch("/api/ifc/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectName, items, byType: result.byType, detail: result.detail }),
+        body: JSON.stringify({ projectName, items, detail: result.detail }),
       });
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const blob = await resp.blob();
@@ -114,8 +134,8 @@ export default function Home() {
 
   const fmt = (n: number) => n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const totalGeral = useMemo(
-    () => (result ? result.items.reduce((s, it) => s + (prices[it.codigo] ?? 0) * it.quantidade, 0) : 0),
-    [result, prices],
+    () => (result ? result.items.reduce((s, it) => s + effPrice(it.codigo) * it.quantidade, 0) : 0),
+    [result, prices, costSource],
   );
 
   // alterna o destaque dos objetos paramétricos de um item no viewer 3D
@@ -147,7 +167,12 @@ export default function Home() {
   return (
     <main className="mx-auto min-h-screen max-w-6xl px-4 py-6">
       <header className="mb-5 flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-bold text-slate-800">Quantitativos IFC</h1>
+        <h1 className="flex items-baseline gap-2 text-2xl font-semibold tracking-tight text-slate-800">
+          Orçamento Preliminar IFC
+          <span className="text-sm font-normal text-slate-400 [font-family:var(--font-signature)]">
+            by Kevin Quintian
+          </span>
+        </h1>
         <div className="flex items-center gap-2">
           <label className="text-sm text-slate-500">Projeto:</label>
           <input
@@ -155,6 +180,17 @@ export default function Home() {
             onChange={(e) => setProjectName(e.target.value)}
             className="rounded border border-slate-300 px-2 py-1 text-sm"
           />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-slate-500">Fonte de Custos:</label>
+          <select
+            value={costSource}
+            onChange={(e) => setCostSource(e.target.value as CostSource)}
+            className="rounded border border-slate-300 px-2 py-1 text-sm"
+          >
+            <option value="SINAPI">SINAPI</option>
+            <option value="USUARIO">Inserido pelo Usuário</option>
+          </select>
         </div>
         <label className="ml-auto cursor-pointer rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700">
           {busy ? "Processando…" : "Abrir IFC"}
@@ -212,16 +248,19 @@ export default function Home() {
           {/* Planilha orçamentária */}
           <section>
             <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-slate-500">Planilha orçamentária</h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full border-collapse text-sm [&_td]:border-r [&_td]:border-slate-100 [&_td:last-child]:border-r-0 [&_th]:border-r [&_th]:border-slate-200 [&_th:last-child]:border-r-0">
                 <thead>
-                  <tr className="border-b text-left text-slate-500">
-                    <th className="py-1 pr-2">Código</th>
-                    <th className="py-1 pr-2">Serviço</th>
-                    <th className="py-1 pr-2">Unid.</th>
-                    <th className="py-1 pr-2 text-right">Quant.</th>
-                    <th className="py-1 pr-2 text-right">Preço unit. (R$)</th>
-                    <th className="py-1 text-right">Total (R$)</th>
+                  <tr className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <th className="px-3 py-2">Código</th>
+                    <th className="px-3 py-2">Serviço</th>
+                    <th className="px-3 py-2">Unid.</th>
+                    <th className="px-3 py-2 text-right">Quant.</th>
+                    <th className="px-3 py-2 text-right">Preço unit. (R$)</th>
+                    {costSource === "SINAPI" && (
+                      <th className="px-3 py-2">CÓDIGO SINAPI / Descrição</th>
+                    )}
+                    <th className="px-3 py-2 text-right">Total (R$)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -232,6 +271,10 @@ export default function Home() {
                       itens={g.itens}
                       prices={prices}
                       setPrices={setPrices}
+                      costSource={costSource}
+                      effPrice={effPrice}
+                      isOverridden={isOverridden}
+                      resetToSinapi={resetToSinapi}
                       fmt={fmt}
                       hasViewer={!!bytes}
                       highlightCodigo={highlightCodigo}
@@ -240,11 +283,11 @@ export default function Home() {
                   ))}
                 </tbody>
                 <tfoot>
-                  <tr className="border-t-2 font-bold">
-                    <td className="py-2" colSpan={5}>
+                  <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
+                    <td className="px-3 py-2" colSpan={costSource === "SINAPI" ? 6 : 5}>
                       TOTAL GERAL
                     </td>
-                    <td className="py-2 text-right">R$ {fmt(totalGeral)}</td>
+                    <td className="px-3 py-2 text-right">R$ {fmt(totalGeral)}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -255,32 +298,6 @@ export default function Home() {
             </p>
           </section>
 
-          {/* Resumo por tipo */}
-          <section>
-            <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-slate-500">Resumo por tipo (IFC)</h2>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-left text-slate-500">
-                  <th className="py-1 pr-2">Tipo</th>
-                  <th className="py-1 pr-2 text-right">Qtd.</th>
-                  <th className="py-1 pr-2 text-right">Área (m²)</th>
-                  <th className="py-1 pr-2 text-right">Comp. (m)</th>
-                  <th className="py-1 text-right">Volume (m³)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.byType.map((t, i) => (
-                  <tr key={i} className="border-b border-slate-100">
-                    <td className="py-1 pr-2">{t.tipo}</td>
-                    <td className="py-1 pr-2 text-right">{t.count}</td>
-                    <td className="py-1 pr-2 text-right">{fmt(t.areaM2)}</td>
-                    <td className="py-1 pr-2 text-right">{fmt(t.comprimentoM)}</td>
-                    <td className="py-1 text-right">{fmt(t.volumeM3)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
         </div>
       )}
     </main>
@@ -292,6 +309,10 @@ function FragmentEtapa({
   itens,
   prices,
   setPrices,
+  costSource,
+  effPrice,
+  isOverridden,
+  resetToSinapi,
   fmt,
   hasViewer,
   highlightCodigo,
@@ -301,6 +322,10 @@ function FragmentEtapa({
   itens: BudgetItem[];
   prices: Record<string, number>;
   setPrices: (fn: (p: Record<string, number>) => Record<string, number>) => void;
+  costSource: CostSource;
+  effPrice: (codigo: string) => number;
+  isOverridden: (codigo: string) => boolean;
+  resetToSinapi: (codigo: string) => void;
   fmt: (n: number) => string;
   hasViewer: boolean;
   highlightCodigo: string | null;
@@ -308,22 +333,28 @@ function FragmentEtapa({
 }) {
   return (
     <>
-      <tr className="bg-slate-100">
-        <td className="py-1 pr-2 font-semibold text-slate-700" colSpan={6}>
+      <tr className="bg-slate-200/60">
+        <td
+          className="!border-r-0 border-y border-slate-200 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600"
+          colSpan={costSource === "SINAPI" ? 7 : 6}
+        >
           {etapa}
         </td>
       </tr>
       {itens.map((it) => {
-        const pu = prices[it.codigo] ?? 0;
+        const pu = effPrice(it.codigo);
+        const overridden = isOverridden(it.codigo);
+        const sinapiOn = costSource === "SINAPI" && !overridden;
+        const ref = sinapiRef(it.codigo);
         const ativo = highlightCodigo === it.codigo;
         const temObjetos = (it.sourceIds?.length ?? 0) > 0;
         return (
           <tr
             key={it.codigo}
-            className={"border-b border-slate-100 " + (ativo ? "bg-orange-50" : "")}
+            className={"border-b border-slate-100 " + (ativo ? "bg-orange-50" : "hover:bg-slate-50/60")}
           >
-            <td className="py-1 pr-2 text-slate-400">{it.codigo}</td>
-            <td className="py-1 pr-2">
+            <td className="px-3 py-1.5 text-slate-400">{it.codigo}</td>
+            <td className="px-3 py-1.5">
               {it.descricao}
               {it.estimado && <span className="ml-1 text-xs text-amber-600">(estimado)</span>}
               {hasViewer && temObjetos && (
@@ -342,22 +373,52 @@ function FragmentEtapa({
                 </button>
               )}
             </td>
-            <td className="py-1 pr-2 text-slate-500">{it.unidade}</td>
-            <td className="py-1 pr-2 text-right">{fmt(it.quantidade)}</td>
-            <td className="py-1 pr-2 text-right">
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={prices[it.codigo] ?? ""}
-                onChange={(e) =>
-                  setPrices((p) => ({ ...p, [it.codigo]: Number(e.target.value) }))
-                }
-                className="w-24 rounded border border-slate-300 px-1 py-0.5 text-right"
-                placeholder="0,00"
-              />
+            <td className="px-3 py-1.5 text-slate-500">{it.unidade}</td>
+            <td className="px-3 py-1.5 text-right">{fmt(it.quantidade)}</td>
+            <td className="px-3 py-1.5 text-right">
+              <div className="flex items-center justify-end gap-1.5">
+                {costSource === "SINAPI" && overridden && (
+                  <button
+                    type="button"
+                    onClick={() => resetToSinapi(it.codigo)}
+                    title="Voltar ao preço de referência SINAPI"
+                    className="rounded border border-slate-300 px-1.5 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                  >
+                    ↺ SINAPI
+                  </button>
+                )}
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={sinapiOn ? sinapiPrice(it.codigo) : prices[it.codigo] ?? ""}
+                  onChange={(e) =>
+                    setPrices((p) => ({ ...p, [it.codigo]: Number(e.target.value) }))
+                  }
+                  className={
+                    "w-24 rounded border px-1.5 py-0.5 text-right " +
+                    (sinapiOn
+                      ? "border-slate-200 bg-slate-50 text-slate-600"
+                      : "border-slate-300")
+                  }
+                  placeholder="0,00"
+                />
+              </div>
             </td>
-            <td className="py-1 text-right font-medium">{fmt(pu * it.quantidade)}</td>
+            {costSource === "SINAPI" && (
+              <td className="px-3 py-1.5 text-xs text-slate-500">
+                {!sinapiOn ? (
+                  <span className="text-slate-300">— inserido pelo usuário</span>
+                ) : ref ? (
+                  <>
+                    <span className="font-medium text-slate-600">{ref.sinapi}</span>
+                    {" · "}
+                    {ref.descricao}
+                  </>
+                ) : null}
+              </td>
+            )}
+            <td className="px-3 py-1.5 text-right font-medium">{fmt(pu * it.quantidade)}</td>
           </tr>
         );
       })}

@@ -1,5 +1,5 @@
 import { buildBudgetWorkbook, type BudgetRow } from "@/lib/ifcXlsx";
-import type { TypeSummary, ElementDetail } from "@/lib/budget";
+import type { ElementDetail } from "@/lib/budget";
 
 export const runtime = "nodejs";
 
@@ -9,13 +9,11 @@ export async function POST(req: Request): Promise<Response> {
     const body = (await req.json()) as {
       projectName?: string;
       items?: BudgetRow[];
-      byType?: TypeSummary[];
       detail?: ElementDetail[];
     };
     const buf = await buildBudgetWorkbook(
       body.projectName || "Projeto",
       Array.isArray(body.items) ? body.items : [],
-      Array.isArray(body.byType) ? body.byType : [],
       Array.isArray(body.detail) ? body.detail : [],
     );
     return new Response(new Uint8Array(buf), {

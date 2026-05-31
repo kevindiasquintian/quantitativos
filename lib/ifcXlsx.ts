@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import type { BudgetResult, TypeSummary, ElementDetail } from "@/lib/budget";
+import type { BudgetResult, ElementDetail } from "@/lib/budget";
 
 // Item da planilha (pode trazer preço unitário informado no app).
 export interface BudgetRow {
@@ -16,7 +16,6 @@ export interface BudgetRow {
 export async function buildBudgetWorkbook(
   projectName: string,
   rows: BudgetRow[],
-  byType: TypeSummary[],
   detail: ElementDetail[],
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
@@ -57,19 +56,6 @@ export async function buildBudgetWorkbook(
   orc.getColumn("qtd").numFmt = "#,##0.00";
   orc.getColumn("pu").numFmt = '"R$" #,##0.00';
   orc.getColumn("total").numFmt = '"R$" #,##0.00';
-
-  // --- Resumo por tipo ---
-  const res = wb.addWorksheet("Resumo por tipo");
-  res.columns = [
-    { header: "Tipo", key: "tipo", width: 18 },
-    { header: "Qtd.", key: "n", width: 8 },
-    { header: "Área (m²)", key: "a", width: 14 },
-    { header: "Comprimento (m)", key: "c", width: 16 },
-    { header: "Volume (m³)", key: "v", width: 14 },
-  ];
-  res.getRow(1).font = { bold: true };
-  byType.forEach((t) => res.addRow({ tipo: t.tipo, n: t.count, a: t.areaM2, c: t.comprimentoM, v: t.volumeM3 }));
-  ["a", "c", "v"].forEach((k) => (res.getColumn(k).numFmt = "#,##0.00"));
 
   // --- Detalhe por elemento ---
   const det = wb.addWorksheet("Detalhe");
