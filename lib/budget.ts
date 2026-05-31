@@ -55,6 +55,16 @@ const wallArea = (e: IfcElement) =>
 const slabProjectedArea = (e: IfcElement) =>
   e.q.GrossFootprintArea ?? e.q.NetArea ?? e.q.GrossArea ?? e.q.Area ?? 0;
 
+// Cobertura: queremos a área da FACE INFERIOR (forro) do telhado, não a
+// superfície total da laje (face inferior + superior + bordas). Quando há a
+// projeção horizontal (GrossFootprintArea), ela já é a face única; caso só haja
+// NetArea/GrossArea (superfície total da laje), a face inferior ≈ metade.
+const roofUndersideArea = (e: IfcElement) => {
+  if (e.q.GrossFootprintArea !== undefined) return e.q.GrossFootprintArea;
+  const surf = e.q.NetArea ?? e.q.GrossArea ?? e.q.Area ?? 0;
+  return surf / 2;
+};
+
 const elemVol = (e: IfcElement) => e.q.NetVolume ?? e.q.GrossVolume ?? 0;
 const elemLen = (e: IfcElement) => e.q.Length ?? e.q.Perimeter ?? 0;
 const openingArea = (e: IfcElement) =>
@@ -138,7 +148,7 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
       }
     } else if (e.type === "IFCSLAB") {
       if (isRoofLike(e.name)) {
-        roofSlabArea += a;
+        roofSlabArea += roofUndersideArea(e);
         src.roofSlab.push(e.id);
       } else {
         slabVol += v;
