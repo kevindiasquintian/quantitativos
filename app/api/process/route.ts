@@ -6,10 +6,16 @@ import type { ExtractionResult } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-// Processa TODAS as paginas do PDF automaticamente, recebendo apenas a escala.
-// Corpo: { docId: string, scaleDenominator: number }  // ex.: 50 para 1:50
+// Processa TODAS as paginas do PDF automaticamente, recebendo a escala.
+// Corpo: { docId: string, metersPerUnit?: number, scaleDenominator?: number }
+//  - metersPerUnit: fator direto (ex.: vindo da calibracao desenhada). Tem prioridade.
+//  - scaleDenominator: alternativa por escala nominal 1:N (ex.: 50 para 1:50).
 export async function POST(req: Request): Promise<Response> {
-  let body: { docId?: unknown; scaleDenominator?: unknown };
+  let body: {
+    docId?: unknown;
+    metersPerUnit?: unknown;
+    scaleDenominator?: unknown;
+  };
   try {
     body = await req.json();
   } catch {
@@ -23,20 +29,33 @@ export async function POST(req: Request): Promise<Response> {
       { status: 400 },
     );
   }
+
+  // Resolve metros por unidade: direto, ou derivado do denominador 1:N.
+  let metersPerUnit: number;
   if (
-    typeof scaleDenominator !== "number" ||
-    !Number.isFinite(scaleDenominator) ||
-    scaleDenominator <= 0
+    typeof body.metersPerUnit === "number" &&
+    Number.isFinite(body.metersPerUnit) &&
+    body.metersPerUnit > 0
   ) {
+    metersPerUnit = body.metersPerUnit;
+  } else if (
+    typeof scaleDenominator === "number" &&
+    Number.isFinite(scaleDenominator) &&
+    scaleDenominator > 0
+  ) {
+    metersPerUnit = scaleToMetersPerUnit(scaleDenominator);
+  } else {
     return NextResponse.json(
-      { error: "Escala invalida. Informe o denominador (ex.: 50 para 1:50)." },
+      {
+        error:
+          "Escala invalida. Informe metersPerUnit (>0) ou scaleDenominator (ex.: 50).",
+      },
       { status: 400 },
     );
   }
 
   try {
     const data = await readDoc(docId);
-    const metersPerUnit = scaleToMetersPerUnit(scaleDenominator);
     // O pdf.js consome (detacha) o Uint8Array em cada getDocument; por isso
     // passamos uma CÓPIA fresca a cada leitura, senão a 2ª leitura vem vazia.
     const metas = await getPagesMeta(new Uint8Array(data));

@@ -1,15 +1,21 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Página principal (cliente) — fluxo AUTOMÁTICO e simples:
+// Página principal (cliente) — fluxo automático:
 //   1) abrir o PDF
-//   2) informar SOMENTE a escala (1:N)
-//   3) um clique lê TODAS as páginas e retorna os quantitativos
+//   2) definir a escala: digitar 1:N OU desenhar uma linha de referência
+//      (trava de 15°/ortogonal, linha visível) e informar o comprimento real
+//   3) "Ler todas as páginas" → quantitativos de todas as páginas
 //   4) baixar a planilha
+// Passar o mouse num quantitativo destaca, no desenho, os itens do cálculo.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useCallback, useRef, useState } from "react";
 import PdfViewer from "@/components/PdfViewer";
+import CalibrationOverlay from "@/components/CalibrationOverlay";
+import HighlightOverlay, {
+  type HighlightTarget,
+} from "@/components/HighlightOverlay";
 import { defaultPremissas } from "@/lib/premissas";
 import type {
   ExtractionResult,
@@ -17,6 +23,9 @@ import type {
   PageMeta,
   UploadResult,
 } from "@/lib/types";
+
+// 1 unidade PDF (1 pt = 1/72") em metros — base para converter escala 1:N.
+const M_POR_UNIDADE = 0.0254 / 72;
 
 export default function Home() {
   const [projectName, setProjectName] = useState("Projeto");
@@ -26,15 +35,25 @@ export default function Home() {
   const [pageIndex, setPageIndex] = useState(0);
   const [zoom, setZoom] = useState(1.2);
 
-  // Única entrada do usuário: o denominador da escala (1:N).
+  // Escala: denominador 1:N e/ou fator calibrado pela linha desenhada.
   const [scaleDen, setScaleDen] = useState(100);
+  const [calibMpu, setCalibMpu] = useState<number | null>(null);
+  const [calibrating, setCalibrating] = useState(false);
 
+  const [renderScale, setRenderScale] = useState(1);
   const [results, setResults] = useState<ExtractionResult[] | null>(null);
+  const [highlight, setHighlight] = useState<HighlightTarget | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const onRenderScale = useCallback(() => {}, []);
+  const onRenderScale = useCallback((rs: number) => setRenderScale(rs), []);
+
+  const meta = pages[pageIndex];
+  const metersPerUnit = calibMpu ?? scaleDen * M_POR_UNIDADE;
+  const canvasW = Math.ceil((meta?.width ?? 0) * renderScale);
+  const canvasH = Math.ceil((meta?.height ?? 0) * renderScale);
+  const currentResult = results?.find((p) => p.pageIndex === pageIndex) ?? null;
 
   // ── 1) Upload ────────────────────────────────────────────────────────────────
   async function handleUpload(file: File) {
@@ -45,6 +64,7 @@ export default function Home() {
       setArrayBuffer(buf);
       setPageIndex(0);
       setResults(null);
+      setCalibMpu(null);
 
       const fd = new FormData();
       fd.append("file", file);
@@ -65,11 +85,11 @@ export default function Home() {
     }
   }
 
-  // ── 2+3) Processar TODAS as páginas (só a escala) ─────────────────────────────
+  // ── 3) Processar todas as páginas ─────────────────────────────────────────────
   async function handleProcess() {
     if (!docId) return;
-    if (!Number.isFinite(scaleDen) || scaleDen <= 0) {
-      setErro("Informe uma escala válida, ex.: 50 para 1:50.");
+    if (!Number.isFinite(metersPerUnit) || metersPerUnit <= 0) {
+      setErro("Defina uma escala válida (1:N ou calibre pela linha).");
       return;
     }
     setErro(null);
@@ -78,7 +98,7 @@ export default function Home() {
       const resp = await fetch("/api/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ docId, scaleDenominator: scaleDen }),
+        body: JSON.stringify({ docId, metersPerUnit }),
       });
       if (!resp.ok) {
         const j = await resp.json().catch(() => null);
@@ -126,7 +146,6 @@ export default function Home() {
     }
   }
 
-  // Totais agregados de todas as páginas.
   const totalArea = results
     ? results.reduce((a, p) => a + p.rooms.reduce((s, r) => s + r.areaM2, 0), 0)
     : 0;
@@ -152,17 +171,37 @@ export default function Home() {
           />
         </div>
 
-        {/* Escala — a única entrada do usuário */}
+        {/* Escala 1:N (a calibração pela linha atualiza este valor) */}
         <div className="flex items-center gap-2">
           <label className="text-sm font-medium text-slate-700">Escala 1 :</label>
           <input
             type="number"
             min={1}
             value={scaleDen}
-            onChange={(e) => setScaleDen(Number(e.target.value))}
+            onChange={(e) => {
+              setScaleDen(Number(e.target.value));
+              setCalibMpu(null); // edição manual sobrepõe a calibração
+            }}
             className="w-24 rounded border border-slate-300 px-2 py-1 text-sm"
           />
+          {calibMpu !== null && (
+            <span className="text-xs text-emerald-600">calibrado</span>
+          )}
         </div>
+
+        <button
+          type="button"
+          onClick={() => setCalibrating((v) => !v)}
+          disabled={!docId}
+          className={
+            "rounded px-3 py-1.5 text-sm font-medium disabled:opacity-40 " +
+            (calibrating
+              ? "bg-red-600 text-white hover:bg-red-700"
+              : "border border-slate-300 text-slate-700 hover:bg-slate-50")
+          }
+        >
+          {calibrating ? "Cancelar calibração" : "Calibrar pela linha"}
+        </button>
 
         <label className="ml-auto cursor-pointer rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700">
           {docId ? "Trocar PDF" : "Abrir PDF"}
@@ -204,7 +243,7 @@ export default function Home() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Pré-visualização do PDF (apenas visual) */}
+        {/* Visualização do PDF + overlays */}
         <div className="flex flex-1 flex-col overflow-hidden">
           {arrayBuffer && pages.length > 0 ? (
             <>
@@ -216,7 +255,28 @@ export default function Home() {
                 onPageChange={setPageIndex}
                 onRenderScale={onRenderScale}
                 canvasRef={canvasRef}
-              />
+              >
+                <HighlightOverlay
+                  canvasW={canvasW}
+                  canvasH={canvasH}
+                  renderScale={renderScale}
+                  pdfHeight={meta?.height ?? 0}
+                  result={currentResult}
+                  highlight={highlight}
+                />
+                <CalibrationOverlay
+                  active={calibrating}
+                  canvasW={canvasW}
+                  canvasH={canvasH}
+                  renderScale={renderScale}
+                  onCalibrated={(mpu) => {
+                    setCalibMpu(mpu);
+                    setScaleDen(Math.max(1, Math.round(mpu / M_POR_UNIDADE)));
+                    setCalibrating(false);
+                  }}
+                  onCancel={() => setCalibrating(false)}
+                />
+              </PdfViewer>
               <div className="flex items-center gap-2 border-t border-slate-200 bg-white px-3 py-2 text-sm">
                 <span className="text-slate-500">Zoom:</span>
                 <button
@@ -238,7 +298,7 @@ export default function Home() {
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center px-6 text-center text-slate-400">
-              Abra um PDF, informe a escala e clique em “Ler todas as páginas”.
+              Abra um PDF, defina a escala e clique em “Ler todas as páginas”.
             </div>
           )}
         </div>
@@ -247,13 +307,13 @@ export default function Home() {
         <aside className="w-[460px] shrink-0 overflow-auto border-l border-slate-200 bg-white p-4">
           {!results && (
             <p className="text-sm text-slate-500">
-              Os quantitativos aparecem aqui depois de ler o PDF.
+              Os quantitativos aparecem aqui depois de ler o PDF. Passe o mouse num
+              item para destacá-lo no desenho.
             </p>
           )}
 
           {results && (
             <div className="space-y-5">
-              {/* Resumo geral */}
               <section>
                 <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-slate-500">
                   Resumo
@@ -269,7 +329,6 @@ export default function Home() {
                 </p>
               </section>
 
-              {/* Detalhe por página */}
               {results.map((p) => {
                 const areaPg = p.rooms.reduce((s, r) => s + r.areaM2, 0);
                 return (
@@ -277,7 +336,25 @@ export default function Home() {
                     <h3 className="mb-1 text-sm font-semibold text-slate-700">
                       Página {p.pageIndex + 1}
                       <span className="ml-2 font-normal text-slate-400">
-                        {areaPg.toFixed(2)} m² · {p.walls.totalLengthM.toFixed(2)} m de parede
+                        <span
+                          className="cursor-pointer hover:text-blue-600"
+                          onMouseEnter={() =>
+                            setHighlight({ pageIndex: p.pageIndex, kind: "allRooms" })
+                          }
+                          onMouseLeave={() => setHighlight(null)}
+                        >
+                          {areaPg.toFixed(2)} m²
+                        </span>
+                        {" · "}
+                        <span
+                          className="cursor-pointer hover:text-amber-600"
+                          onMouseEnter={() =>
+                            setHighlight({ pageIndex: p.pageIndex, kind: "walls" })
+                          }
+                          onMouseLeave={() => setHighlight(null)}
+                        >
+                          {p.walls.totalLengthM.toFixed(2)} m de parede
+                        </span>
                       </span>
                     </h3>
                     {p.rooms.length === 0 ? (
@@ -294,7 +371,18 @@ export default function Home() {
                         </thead>
                         <tbody>
                           {p.rooms.map((r) => (
-                            <tr key={r.id} className="border-t border-slate-100">
+                            <tr
+                              key={r.id}
+                              className="cursor-pointer border-t border-slate-100 hover:bg-blue-50"
+                              onMouseEnter={() =>
+                                setHighlight({
+                                  pageIndex: p.pageIndex,
+                                  kind: "room",
+                                  roomId: r.id,
+                                })
+                              }
+                              onMouseLeave={() => setHighlight(null)}
+                            >
                               <td className="py-1">{r.label}</td>
                               <td className="py-1 text-right">{r.areaM2.toFixed(2)}</td>
                             </tr>
