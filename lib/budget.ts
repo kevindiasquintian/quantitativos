@@ -89,7 +89,8 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
     slabAreaPiso = 0,
     slabAreaTotal = 0,
     maxPisoArea = 0;
-  let roofArea = 0;
+  let roofSlabArea = 0,
+    roofContainerArea = 0;
   let footingVol = 0,
     columnVol = 0,
     beamVol = 0;
@@ -103,7 +104,8 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
     wallExt: [] as number[],
     wallInt: [] as number[],
     slabPiso: [] as number[],
-    roof: [] as number[],
+    roofSlab: [] as number[],
+    roofContainer: [] as number[],
     footing: [] as number[],
     column: [] as number[],
     beam: [] as number[],
@@ -136,8 +138,8 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
       }
     } else if (e.type === "IFCSLAB") {
       if (isRoofLike(e.name)) {
-        roofArea += a;
-        src.roof.push(e.id);
+        roofSlabArea += a;
+        src.roofSlab.push(e.id);
       } else {
         slabVol += v;
         slabAreaPiso += a;
@@ -148,8 +150,8 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
     } else if (e.type === "IFCROOF") {
       // Usa GrossFootprintArea (projeção horizontal); derivada pelo parser das
       // paredes quando o elemento não tem geometria própria.
-      roofArea += a;
-      src.roof.push(e.id);
+      roofContainerArea += a;
+      src.roofContainer.push(e.id);
     } else if (e.type === "IFCFOOTING") {
       footingVol += v;
       src.footing.push(e.id);
@@ -179,12 +181,20 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
   // Se a área de cobertura retornada é a superfície inclinada real (> 2× a projeção
   // estimada pela laje de piso), ou zero, usa a laje de piso como melhor estimativa
   // da área projetada. Para telhados em duas águas, cada aba tem ~60% da projeção.
-  const roofFallback = slabAreaPiso > 0 ? slabAreaPiso : maxPisoArea;
-  let roofSrc = src.roof;
-  if (roofArea <= 0 || (roofFallback > 0 && roofArea > roofFallback * 2)) {
-    roofArea = roofFallback > 0 ? roofFallback : roofArea;
-    // a área passou a vir das lajes de piso → os objetos-fonte também.
-    if (src.slabPiso.length) roofSrc = src.slabPiso;
+  // Cobertura: prioriza as LAJES de telhado (têm a área real, ex.: NetArea) e
+  // destaca esses mesmos objetos. Evita o container IfcRoof (agregador) para não
+  // duplicar. Sem lajes de telhado, usa o IfcRoof; sem nada, a laje de piso.
+  let roofArea = 0;
+  let roofSrc: number[] = [];
+  if (src.roofSlab.length) {
+    roofArea = roofSlabArea;
+    roofSrc = src.roofSlab;
+  } else if (src.roofContainer.length) {
+    roofArea = roofContainerArea;
+    roofSrc = src.roofContainer;
+  } else if (slabAreaPiso > 0) {
+    roofArea = slabAreaPiso;
+    roofSrc = src.slabPiso;
   }
 
   // Área de paredes a revestir: externa = 1 face; interna = 2 faces.
@@ -246,7 +256,7 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
 
   // 9. Pintura
   add("9.1", "Pintura", "Pintura látex em paredes (2 demãos)", "m²", areaRevest, "Faces de parede revestidas.", wallAll, true);
-  add("9.2", "Pintura", "Pintura de teto sobre laje", "m²", slabAreaTotal, "Área inferior das lajes (forro).", src.slabPiso, true);
+  add("9.2", "Pintura", "Pintura de teto/forro", "m²", roofArea, "Área de teto (projeção da cobertura/laje superior).", roofSrc, true);
 
   const byType = [...byTypeMap.values()].sort((a, b) => b.areaM2 - a.areaM2);
   return { items, detail, byType };
