@@ -1,10 +1,23 @@
 import ExcelJS from "exceljs";
-import type { BudgetResult } from "@/lib/budget";
+import type { BudgetResult, TypeSummary, ElementDetail } from "@/lib/budget";
 
-// Gera a planilha de quantitativos/orçamento a partir do resultado do IFC.
+// Item da planilha (pode trazer preço unitário informado no app).
+export interface BudgetRow {
+  codigo: string;
+  etapa: string;
+  descricao: string;
+  unidade: string;
+  quantidade: number;
+  criterio?: string;
+  estimado?: boolean;
+  precoUnitario?: number;
+}
+
 export async function buildBudgetWorkbook(
   projectName: string,
-  budget: BudgetResult,
+  rows: BudgetRow[],
+  byType: TypeSummary[],
+  detail: ElementDetail[],
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = "Quantitativos IFC";
@@ -12,16 +25,38 @@ export async function buildBudgetWorkbook(
   // --- Orçamento ---
   const orc = wb.addWorksheet("Orçamento");
   orc.columns = [
-    { header: "Item", key: "item", width: 8 },
-    { header: "Serviço", key: "servico", width: 46 },
+    { header: "Código", key: "codigo", width: 9 },
+    { header: "Etapa", key: "etapa", width: 22 },
+    { header: "Serviço", key: "descricao", width: 46 },
     { header: "Unid.", key: "un", width: 8 },
-    { header: "Quantidade", key: "qtd", width: 14 },
+    { header: "Quantidade", key: "qtd", width: 13 },
+    { header: "Preço unit. (R$)", key: "pu", width: 16 },
+    { header: "Total (R$)", key: "total", width: 16 },
+    { header: "Critério / obs.", key: "criterio", width: 42 },
   ];
   orc.getRow(1).font = { bold: true };
-  budget.items.forEach((it, i) => {
-    orc.addRow({ item: i + 1, servico: it.servico, un: it.unidade, qtd: it.quantidade });
-  });
+
+  let grand = 0;
+  for (const r of rows) {
+    const pu = r.precoUnitario ?? 0;
+    const total = pu * r.quantidade;
+    grand += total;
+    orc.addRow({
+      codigo: r.codigo,
+      etapa: r.etapa,
+      descricao: r.descricao + (r.estimado ? " (estimado)" : ""),
+      un: r.unidade,
+      qtd: r.quantidade,
+      pu: pu || null,
+      total: total || null,
+      criterio: r.criterio ?? "",
+    });
+  }
+  const totalRow = orc.addRow({ descricao: "TOTAL GERAL", total: grand || null });
+  totalRow.font = { bold: true };
   orc.getColumn("qtd").numFmt = "#,##0.00";
+  orc.getColumn("pu").numFmt = '"R$" #,##0.00';
+  orc.getColumn("total").numFmt = '"R$" #,##0.00';
 
   // --- Resumo por tipo ---
   const res = wb.addWorksheet("Resumo por tipo");
@@ -33,9 +68,7 @@ export async function buildBudgetWorkbook(
     { header: "Volume (m³)", key: "v", width: 14 },
   ];
   res.getRow(1).font = { bold: true };
-  budget.byType.forEach((t) =>
-    res.addRow({ tipo: t.tipo, n: t.count, a: t.areaM2, c: t.comprimentoM, v: t.volumeM3 }),
-  );
+  byType.forEach((t) => res.addRow({ tipo: t.tipo, n: t.count, a: t.areaM2, c: t.comprimentoM, v: t.volumeM3 }));
   ["a", "c", "v"].forEach((k) => (res.getColumn(k).numFmt = "#,##0.00"));
 
   // --- Detalhe por elemento ---
@@ -49,11 +82,12 @@ export async function buildBudgetWorkbook(
     { header: "Volume (m³)", key: "v", width: 12 },
   ];
   det.getRow(1).font = { bold: true };
-  budget.detail.forEach((e) =>
-    det.addRow({ tipo: e.tipo, nome: e.nome, guid: e.guid, a: e.areaM2, c: e.comprimentoM, v: e.volumeM3 }),
-  );
+  detail.forEach((e) => det.addRow({ tipo: e.tipo, nome: e.nome, guid: e.guid, a: e.areaM2, c: e.comprimentoM, v: e.volumeM3 }));
   ["a", "c", "v"].forEach((k) => (det.getColumn(k).numFmt = "#,##0.00"));
 
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf);
 }
+
+// (mantém BudgetResult acessível para tipagem do chamador)
+export type { BudgetResult };

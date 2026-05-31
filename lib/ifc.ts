@@ -1,20 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Parser leve de IFC (STEP / ISO-10303-21) para quantitativos.
-// Lê entidades #ID= TIPO(args), extrai elementos construtivos e suas
-// BaseQuantities (Length/Area/Volume), normaliza unidades e devolve uma lista
-// de elementos com quantidades em metros / m² / m³.
-//
-// Não é um parser IFC completo — foca no necessário para takeoff de quantidades.
+// Fonte principal: BaseQuantities (IFCQUANTITYAREA/LENGTH/VOLUME) quando
+// disponíveis (ex.: Revit com QuantityTakeOff).
+// Fallback: extração da geometria (IFCEXTRUDEDAREASOLID + IFCRECTANGLEPROFILEDEF)
+// para IFCs sem BaseQuantities.
+// Unidades: comprimento em mm normalizado para m; área mm²→m²; volume mm³→m³.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type QtyKind = "length" | "area" | "volume" | "count";
 
 export interface IfcElement {
   id: number;
-  type: string; // ex.: "IFCWALLSTANDARDCASE"
-  name: string; // ex.: "Basic Wall: Yttervägg Paroc"
+  type: string;
+  name: string;
   guid: string;
-  /** quantidades normalizadas (m, m², m³), uma por nome. */
   q: Record<string, number>;
 }
 
@@ -35,72 +34,48 @@ const ELEMENT_TYPES = new Set([
   "IFCFOOTING",
 ]);
 
-/** Decodifica escapes de texto do IFC (\X2\00E5\X0\, \X\E5, \S\). */
 export function decodeIfcText(s: string): string {
   if (!s) return s;
-  // \X2\....\X0\  (sequência de code units UTF-16 em hex)
   s = s.replace(/\\X2\\([0-9A-Fa-f]+)\\X0\\/g, (_, hex: string) => {
     let out = "";
-    for (let i = 0; i < hex.length; i += 4) {
+    for (let i = 0; i < hex.length; i += 4)
       out += String.fromCharCode(parseInt(hex.substr(i, 4), 16));
-    }
     return out;
   });
-  // \X\HH  (um byte em hex, latin-1)
   s = s.replace(/\\X\\([0-9A-Fa-f]{2})/g, (_, hex: string) =>
     String.fromCharCode(parseInt(hex, 16)),
   );
-  // \S\x  -> caractere + 0x80 (ISO 8859); aproximação simples
   s = s.replace(/\\S\\(.)/g, (_, c: string) =>
     String.fromCharCode(c.charCodeAt(0) + 128),
   );
-  s = s.replace(/\\\\/g, "\\");
-  return s;
+  return s.replace(/\\\\/g, "\\");
 }
 
-/** Quebra os argumentos de uma entidade em tokens de topo (respeita aspas e parênteses). */
 function splitArgs(s: string): string[] {
   const out: string[] = [];
-  let depth = 0;
-  let inStr = false;
-  let cur = "";
+  let depth = 0, inStr = false, cur = "";
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (inStr) {
       cur += c;
       if (c === "'") {
-        // aspa escapada ''
-        if (s[i + 1] === "'") {
-          cur += "'";
-          i++;
-        } else inStr = false;
+        if (s[i + 1] === "'") { cur += "'"; i++; } else inStr = false;
       }
       continue;
     }
-    if (c === "'") {
-      inStr = true;
-      cur += c;
-    } else if (c === "(") {
-      depth++;
-      cur += c;
-    } else if (c === ")") {
-      depth--;
-      cur += c;
-    } else if (c === "," && depth === 0) {
-      out.push(cur.trim());
-      cur = "";
-    } else {
-      cur += c;
-    }
+    if (c === "'") { inStr = true; cur += c; }
+    else if (c === "(") { depth++; cur += c; }
+    else if (c === ")") { depth--; cur += c; }
+    else if (c === "," && depth === 0) { out.push(cur.trim()); cur = ""; }
+    else cur += c;
   }
   if (cur.trim().length) out.push(cur.trim());
   return out;
 }
 
 function unquote(s: string): string {
-  if (s.startsWith("'") && s.endsWith("'")) {
+  if (s.startsWith("'") && s.endsWith("'"))
     return decodeIfcText(s.slice(1, -1).replace(/''/g, "'"));
-  }
   return s;
 }
 
@@ -109,79 +84,195 @@ function refIds(s: string): number[] {
   return m ? m.map((x) => parseInt(x.slice(1), 10)) : [];
 }
 
-interface Stmt {
-  id: number;
-  type: string;
-  args: string;
+function firstRef(s: string): number | null {
+  const m = s.match(/#(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
 }
 
-/** Itera as instruções #ID= TIPO(args); da seção DATA. */
+interface Stmt { id: number; type: string; args: string; }
+
 function* statements(text: string): Generator<Stmt> {
   const start = text.indexOf("DATA;");
   const body = start >= 0 ? text.slice(start + 5) : text;
   const re = /#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*?)\)\s*;/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(body))) {
+  while ((m = re.exec(body)))
     yield { id: parseInt(m[1], 10), type: m[2], args: m[3] };
-  }
 }
 
-/** Normaliza um valor de quantidade para a unidade métrica (m, m², m³). */
 function normalize(kind: QtyKind, value: number): number {
-  if (kind === "length") return value / 1000; // arquivo usa mm
-  if (kind === "area") return value > 10000 ? value / 1e6 : value; // mm² -> m²
-  if (kind === "volume") return value > 10000 ? value / 1e9 : value; // mm³ -> m³
+  if (kind === "length") return value / 1000;
+  if (kind === "area") return value > 10000 ? value / 1e6 : value;
+  if (kind === "volume") return value > 10000 ? value / 1e9 : value;
   return value;
 }
 
-export interface IfcParseResult {
-  elements: IfcElement[];
-  schema: string;
+// ─── Geometria ────────────────────────────────────────────────────────────────
+
+interface RectProfile { xdim: number; ydim: number; }
+interface ExtrudedSolid { profileRef: number; depth: number; }
+
+/**
+ * Para elementos sem BaseQuantities, tenta extrair quantidades a partir da
+ * geometria (IFCEXTRUDEDAREASOLID + IFCRECTANGLEPROFILEDEF).
+ * Todos os valores estão em mm / mm² / mm³ (normalização ocorre depois).
+ */
+function fillFromGeometry(
+  elements: Map<number, IfcElement>,
+  profiles: Map<number, RectProfile>,
+  extrudeds: Map<number, ExtrudedSolid>,
+  elemShapeItems: Map<number, number[]>, // elementId → list of geometry item IDs
+): void {
+  for (const [id, el] of elements) {
+    if (Object.keys(el.q).length > 0) continue; // já tem BaseQty
+    const items = elemShapeItems.get(id) ?? [];
+    for (const itemId of items) {
+      const ex = extrudeds.get(itemId);
+      if (!ex) continue;
+      const prof = profiles.get(ex.profileRef);
+      if (!prof) continue;
+
+      // Para paredes/colunas: XDim = espessura, YDim = comprimento (ou vice-versa).
+      // Normalizamos: length = dimensão maior, width = menor.
+      const len = Math.max(prof.xdim, prof.ydim); // mm
+      const wid = Math.min(prof.xdim, prof.ydim); // mm (espessura)
+      const hgt = ex.depth; // mm (altura)
+
+      if (el.q.Length === undefined) el.q.Length = len;
+      if (el.q.Width === undefined) el.q.Width = wid;
+      if (el.q.Height === undefined) el.q.Height = hgt;
+      // Área de face (projeção lateral = comprimento × altura)
+      if (el.q.NetSideArea === undefined) el.q.NetSideArea = len * hgt;
+      // Volume (mm³ → será normalizado depois)
+      if (el.q.NetVolume === undefined) el.q.NetVolume = prof.xdim * prof.ydim * hgt;
+      // Para lajes/coberturas horizontais a "projeção" é len × wid (planta)
+      if (el.q.GrossFootprintArea === undefined) el.q.GrossFootprintArea = len * wid;
+      break;
+    }
+  }
 }
+
+/**
+ * Para IFCROOF sem geometria: deriva a área projetada (footprint) a partir do
+ * bounding-box das paredes — produto dos dois comprimentos distintos mais comuns.
+ */
+function derivedRoofFootprint(elements: Map<number, IfcElement>): number {
+  const isWall = (t: string) => t === "IFCWALL" || t === "IFCWALLSTANDARDCASE";
+  const lengths: number[] = [];
+  for (const el of elements.values()) {
+    if (!isWall(el.type)) continue;
+    const l = el.q.Length ?? el.q.NetSideArea ?? 0; // Length em mm (pré-normalização)
+    if (l > 0) lengths.push(l);
+  }
+  if (lengths.length < 2) return 0;
+  // Encontra dois valores distintos de comprimento (as duas dimensões da casa).
+  lengths.sort((a, b) => b - a);
+  const l1 = lengths[0];
+  const l2 = lengths.find((l) => Math.abs(l - l1) / l1 > 0.05) ?? l1;
+  // Converte mm → m e retorna produto (área projetada).
+  return (l1 / 1000) * (l2 / 1000);
+}
+
+// ─── Parser principal ──────────────────────────────────────────────────────────
+
+export interface IfcParseResult { elements: IfcElement[]; schema: string; }
 
 export function parseIfc(text: string): IfcParseResult {
   const schemaMatch = text.match(/FILE_SCHEMA\(\('([^']+)'/);
   const schema = schemaMatch ? schemaMatch[1] : "?";
 
-  // 1) primeira passada: indexa quantidades, conjuntos e elementos.
   const qty = new Map<number, { name: string; kind: QtyKind; value: number }>();
   const elemQty = new Map<number, { name: string; refs: number[] }>();
   const rels: Array<{ objs: number[]; def: number }> = [];
   const elements = new Map<number, IfcElement>();
 
+  // Geometria
+  const profiles = new Map<number, RectProfile>();
+  const extrudeds = new Map<number, ExtrudedSolid>();
+  // shapeRep id → list of geometry item ids
+  const repItems = new Map<number, number[]>();
+  // productDefShape id → list of shapeRep ids
+  const defShapeReps = new Map<number, number[]>();
+  // elementId → representation ref (arg 6 for most elements = IFC4/IFC2x3)
+  const elemRepRef = new Map<number, number>();
+
   for (const st of statements(text)) {
-    if (st.type === "IFCQUANTITYLENGTH" || st.type === "IFCQUANTITYAREA" || st.type === "IFCQUANTITYVOLUME" || st.type === "IFCQUANTITYCOUNT") {
-      const a = splitArgs(st.args);
-      const name = unquote(a[0] ?? "");
-      const value = parseFloat(a[a.length - 1]);
-      const kind: QtyKind =
-        st.type === "IFCQUANTITYLENGTH"
-          ? "length"
-          : st.type === "IFCQUANTITYAREA"
-            ? "area"
-            : st.type === "IFCQUANTITYVOLUME"
-              ? "volume"
-              : "count";
-      if (Number.isFinite(value)) qty.set(st.id, { name, kind, value });
-    } else if (st.type === "IFCELEMENTQUANTITY") {
-      const a = splitArgs(st.args);
-      const name = unquote(a[0] ?? "");
-      const refs = refIds(a[a.length - 1] ?? "");
-      elemQty.set(st.id, { name, refs });
-    } else if (st.type === "IFCRELDEFINESBYPROPERTIES") {
-      const a = splitArgs(st.args);
-      const objs = refIds(a[4] ?? "");
-      const def = refIds(a[a.length - 1] ?? "")[0];
-      if (def) rels.push({ objs, def });
-    } else if (ELEMENT_TYPES.has(st.type)) {
-      const a = splitArgs(st.args);
-      const guid = unquote(a[0] ?? "");
-      const name = unquote(a[2] ?? ""); // Name (Family:Type:Id)
-      elements.set(st.id, { id: st.id, type: st.type, name, guid, q: {} });
+    switch (st.type) {
+      case "IFCQUANTITYLENGTH":
+      case "IFCQUANTITYAREA":
+      case "IFCQUANTITYVOLUME":
+      case "IFCQUANTITYCOUNT": {
+        const a = splitArgs(st.args);
+        const name = unquote(a[0] ?? "");
+        const value = parseFloat(a[a.length - 1]);
+        const kind: QtyKind =
+          st.type === "IFCQUANTITYLENGTH" ? "length"
+          : st.type === "IFCQUANTITYAREA" ? "area"
+          : st.type === "IFCQUANTITYVOLUME" ? "volume"
+          : "count";
+        if (Number.isFinite(value)) qty.set(st.id, { name, kind, value });
+        break;
+      }
+      case "IFCELEMENTQUANTITY": {
+        const a = splitArgs(st.args);
+        const name = unquote(a[0] ?? "");
+        const refs = refIds(a[a.length - 1] ?? "");
+        elemQty.set(st.id, { name, refs });
+        break;
+      }
+      case "IFCRELDEFINESBYPROPERTIES": {
+        const a = splitArgs(st.args);
+        const objs = refIds(a[4] ?? "");
+        const def = refIds(a[a.length - 1] ?? "")[0];
+        if (def) rels.push({ objs, def });
+        break;
+      }
+      case "IFCRECTANGLEPROFILEDEF": {
+        const a = splitArgs(st.args);
+        // args: ProfileType, ProfileName, Position, XDim, YDim
+        const xdim = parseFloat(a[3] ?? "0");
+        const ydim = parseFloat(a[4] ?? "0");
+        if (Number.isFinite(xdim) && Number.isFinite(ydim))
+          profiles.set(st.id, { xdim, ydim });
+        break;
+      }
+      case "IFCEXTRUDEDAREASOLID": {
+        const a = splitArgs(st.args);
+        // args: SweptArea, Position, ExtrudedDirection, Depth
+        const profileRef = firstRef(a[0] ?? "");
+        const depth = parseFloat(a[3] ?? "0");
+        if (profileRef !== null && Number.isFinite(depth) && depth > 0)
+          extrudeds.set(st.id, { profileRef, depth });
+        break;
+      }
+      case "IFCSHAPEREPRESENTATION": {
+        const a = splitArgs(st.args);
+        // args: ContextOfItems, RepresentationIdentifier, RepresentationType, Items
+        const items = refIds(a[3] ?? "");
+        if (items.length) repItems.set(st.id, items);
+        break;
+      }
+      case "IFCPRODUCTDEFINITIONSHAPE": {
+        const a = splitArgs(st.args);
+        // args: Name, Description, Representations
+        const reps = refIds(a[2] ?? "");
+        if (reps.length) defShapeReps.set(st.id, reps);
+        break;
+      }
+      default:
+        if (ELEMENT_TYPES.has(st.type)) {
+          const a = splitArgs(st.args);
+          const guid = unquote(a[0] ?? "");
+          const name = unquote(a[2] ?? "");
+          elements.set(st.id, { id: st.id, type: st.type, name, guid, q: {} });
+          // Representation é o arg 6 (0-based) para IfcElement (IFC4 e IFC2x3).
+          const repRef = firstRef(a[6] ?? "");
+          if (repRef !== null) elemRepRef.set(st.id, repRef);
+        }
     }
   }
 
-  // 2) liga elementos -> quantidades via IfcRelDefinesByProperties -> IfcElementQuantity
+  // Liga elementos → BaseQuantities.
   for (const rel of rels) {
     const eq = elemQty.get(rel.def);
     if (!eq) continue;
@@ -192,11 +283,60 @@ export function parseIfc(text: string): IfcParseResult {
         const q = qty.get(ref);
         if (!q) continue;
         const val = normalize(q.kind, q.value);
-        // O Revit às vezes exporta a MESMA quantidade duas vezes (bruto x líquido,
-        // com o mesmo nome). Para orçamento mantemos o menor (líquido, já sem vãos).
-        el.q[q.name] =
-          el.q[q.name] === undefined ? val : Math.min(el.q[q.name], val);
+        // Mantém o menor (líquido) quando o Revit exporta bruto e líquido com o mesmo nome.
+        el.q[q.name] = el.q[q.name] === undefined ? val : Math.min(el.q[q.name], val);
       }
+    }
+  }
+
+  // Constrói mapa element → lista de itens de geometria.
+  const elemShapeItems = new Map<number, number[]>();
+  for (const [elId, defId] of elemRepRef) {
+    const reps = defShapeReps.get(defId) ?? [];
+    const items: number[] = [];
+    for (const repId of reps) {
+      for (const itemId of repItems.get(repId) ?? []) items.push(itemId);
+    }
+    if (items.length) elemShapeItems.set(elId, items);
+  }
+
+  // Fallback: preenche quantidades a partir da geometria para elementos sem BaseQty.
+  fillFromGeometry(elements, profiles, extrudeds, elemShapeItems);
+
+  // Para IFCROOF sem área: deriva da projeção das paredes ANTES de normalizar
+  // (as quantidades geométricas ainda estão em mm neste ponto).
+  for (const el of elements.values()) {
+    if (el.type !== "IFCROOF") continue;
+    const hasArea =
+      (el.q.GrossFootprintArea ?? 0) || (el.q.GrossArea ?? 0) ||
+      (el.q.NetArea ?? 0) || (el.q.Area ?? 0);
+    if (hasArea > 0) continue;
+    // derivedRoofFootprint lê Length (em mm) e converte para m internamente.
+    const footprint = derivedRoofFootprint(elements);
+    if (footprint > 0) {
+      // Já retorna em m² — seta diretamente para não ser reprocessado.
+      el.q._roofFootprintM2 = footprint;
+    }
+  }
+
+  // Normaliza as quantidades geométricas (que estão em mm / mm² / mm³).
+  for (const el of elements.values()) {
+    if (Object.keys(el.q).length === 0) continue;
+    for (const [k, v] of Object.entries(el.q)) {
+      if (k === "_roofFootprintM2") continue; // já em m²
+      let norm = v;
+      if (k.includes("Volume")) norm = v > 10000 ? v / 1e9 : v;
+      else if (k.includes("Area") || k.includes("area")) norm = v > 10000 ? v / 1e6 : v;
+      else if (k === "Length" || k === "Width" || k === "Height") norm = v > 10 ? v / 1000 : v;
+      el.q[k] = norm;
+    }
+  }
+
+  // Promove _roofFootprintM2 para GrossFootprintArea após normalização.
+  for (const el of elements.values()) {
+    if (el.q._roofFootprintM2 !== undefined) {
+      el.q.GrossFootprintArea = el.q._roofFootprintM2;
+      delete el.q._roofFootprintM2;
     }
   }
 
