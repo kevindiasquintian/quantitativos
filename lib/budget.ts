@@ -256,7 +256,7 @@ export function buildBudget(elements: IfcElement[]): BudgetResult {
 
   // 9. Pintura
   add("9.1", "Pintura", "Pintura látex em paredes (2 demãos)", "m²", areaRevest, "Faces de parede revestidas.", wallAll, true);
-  add("9.2", "Pintura", "Pintura de teto/forro", "m²", roofArea, "Área de teto (projeção da cobertura/laje superior).", roofSrc, true);
+  add("9.2", "Pintura", "Pintura de teto/forro", "m²", roofSlabArea, "Área inferior das lajes de teto (forro).", src.roofSlab, true);
 
   const byType = [...byTypeMap.values()].sort((a, b) => b.areaM2 - a.areaM2);
   return { items, detail, byType };
