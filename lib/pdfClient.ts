@@ -24,6 +24,11 @@ if (typeof window !== "undefined") {
 // com WeakMap quando possível; aqui mantemos um par {key,doc} simples.
 let cached: { key: ArrayBuffer | Uint8Array; doc: PDFDocumentProxy } | null = null;
 
+// Render em andamento por canvas. O pdf.js proíbe dois render() simultâneos no
+// mesmo canvas; guardamos a tarefa atual para cancelá-la antes de iniciar outra
+// (re-renders do React/StrictMode, troca rápida de página/zoom).
+const inFlight = new WeakMap<HTMLCanvasElement, { cancel: () => void; promise: Promise<unknown> }>();
+
 /** Copia os bytes para um Uint8Array independente (pdf.js consome/transfere o buffer). */
 function toBytes(fileData: ArrayBuffer | Uint8Array): Uint8Array {
   if (fileData instanceof Uint8Array) return new Uint8Array(fileData);
@@ -77,6 +82,17 @@ export async function renderPageToCanvas(
     throw new Error("Não foi possível obter o contexto 2D do canvas.");
   }
 
+  // Cancela um render anterior ainda em andamento neste canvas.
+  const prev = inFlight.get(canvas);
+  if (prev) {
+    prev.cancel();
+    try {
+      await prev.promise;
+    } catch {
+      // ignora o cancelamento do render anterior
+    }
+  }
+
   // Ajusta o tamanho do canvas em pixels ao da viewport renderizada.
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
@@ -84,7 +100,19 @@ export async function renderPageToCanvas(
   // Limpa antes de desenhar (importante ao trocar de página).
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  await page.render({ canvasContext: ctx, viewport }).promise;
+  const task = page.render({ canvasContext: ctx, viewport });
+  inFlight.set(canvas, task);
+  try {
+    await task.promise;
+  } catch (e) {
+    // Render cancelado (substituído por outro mais recente): não é erro real.
+    if (e && typeof e === "object" && (e as { name?: string }).name === "RenderingCancelledException") {
+      return { pdfWidth, pdfHeight, renderScale: viewport.scale };
+    }
+    throw e;
+  } finally {
+    if (inFlight.get(canvas) === task) inFlight.delete(canvas);
+  }
 
   // renderScale = pixels do canvas por unidade PDF (== scale da viewport).
   return { pdfWidth, pdfHeight, renderScale: viewport.scale };
