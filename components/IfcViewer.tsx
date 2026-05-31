@@ -1,35 +1,54 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visualizador IFC 3D usando @thatopen/components (open-source, sucessor do
-// IFC.js, sobre Three.js). Carrega o arquivo IFC em bytes e renderiza o modelo.
-// Importado via next/dynamic com ssr:false (usa window/WebGL).
+// Visualizador IFC 3D (@thatopen/components, sobre Three.js).
+// Carrega o modelo e permite DESTACAR objetos por expressID (localId), usados
+// para destacar os elementos que compõem um item do orçamento.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useRef, useState } from "react";
 
 interface Props {
   bytes: Uint8Array | null;
+  /** expressIDs (#N do IFC) a destacar no modelo. */
+  highlightIds?: number[];
 }
 
-export default function IfcViewer({ bytes }: Props) {
+// material de destaque (laranja)
+const HL_MATERIAL = {
+  color: { r: 1, g: 0.45, b: 0 },
+  opacity: 1,
+  transparent: false,
+  renderedFaces: 0,
+} as const;
+
+export default function IfcViewer({ bytes, highlightIds }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [carregando, setCarregando] = useState(false);
 
+  // refs para acesso fora do effect de carga
+  const modelRef = useRef<any>(null);
+  const fragmentsRef = useRef<any>(null);
+  const worldRef = useRef<any>(null);
+  const threeRef = useRef<any>(null);
+  const readyRef = useRef(false);
+
+  // ── Carrega o modelo quando os bytes mudam ──────────────────────────────────
   useEffect(() => {
     if (!bytes || !containerRef.current) return;
     const container = containerRef.current;
     let disposed = false;
-    // guarda para limpeza
     const cleanup: Array<() => void> = [];
 
     (async () => {
       setErro(null);
       setCarregando(true);
+      readyRef.current = false;
       try {
         const OBC = await import("@thatopen/components");
         const THREE = await import("three");
+        threeRef.current = THREE;
 
         const components = new OBC.Components();
         const worlds = components.get(OBC.Worlds);
@@ -44,12 +63,13 @@ export default function IfcViewer({ bytes }: Props) {
         components.init();
         world.scene.setup();
         world.scene.three.background = null;
+        worldRef.current = world;
 
         const grids = components.get(OBC.Grids);
         grids.create(world);
 
-        // Sistema de fragments (v3): inicializa o worker de geometria.
         const fragments = components.get(OBC.FragmentsManager);
+        fragmentsRef.current = fragments;
         const workerResp = await fetch(
           "https://thatopen.github.io/engine_fragment/resources/worker.mjs",
         );
@@ -62,15 +82,13 @@ export default function IfcViewer({ bytes }: Props) {
         world.camera.controls.addEventListener("rest", () =>
           fragments.core.update(true),
         );
-        fragments.list.onItemSet.add(({ value: model }) => {
+        fragments.list.onItemSet.add(({ value: model }: any) => {
           model.useCamera(world.camera.three);
           world.scene.three.add(model.object);
           fragments.core.update(true);
         });
 
         const ifcLoader = components.get(OBC.IfcLoader);
-        // autoSetWasm:false impede o auto-resolver (que quebra a instanciação);
-        // usamos o wasm local (0.0.77) servido de /public.
         await ifcLoader.setup({
           autoSetWasm: false,
           wasm: { path: "/", absolute: true },
@@ -81,25 +99,35 @@ export default function IfcViewer({ bytes }: Props) {
           components.dispose();
           return;
         }
+        modelRef.current = model;
+        readyRef.current = true;
 
-        // Enquadra a câmera no modelo.
         try {
           const box = new THREE.Box3().setFromObject(model.object);
           const sphere = box.getBoundingSphere(new THREE.Sphere());
-          if (sphere.radius > 0 && world.camera.controls) {
+          if (sphere.radius > 0 && world.camera.controls)
             await world.camera.controls.fitToSphere(sphere, true);
-          }
         } catch {
-          /* ignora falha de enquadramento */
+          /* ignora */
         }
+
+        // aplica highlight pendente (se já havia seleção)
+        await applyHighlight();
 
         cleanup.push(() => {
           URL.revokeObjectURL(workerUrl);
           components.dispose();
+          modelRef.current = null;
+          fragmentsRef.current = null;
+          worldRef.current = null;
+          readyRef.current = false;
         });
       } catch (e) {
         if (!disposed)
-          setErro("Falha ao carregar o modelo 3D: " + (e instanceof Error ? e.message : String(e)));
+          setErro(
+            "Falha ao carregar o modelo 3D: " +
+              (e instanceof Error ? e.message : String(e)),
+          );
       } finally {
         if (!disposed) setCarregando(false);
       }
@@ -115,7 +143,47 @@ export default function IfcViewer({ bytes }: Props) {
         }
       });
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bytes]);
+
+  // ── Aplica o destaque quando highlightIds muda ──────────────────────────────
+  async function applyHighlight() {
+    const model = modelRef.current;
+    const fragments = fragmentsRef.current;
+    const world = worldRef.current;
+    const THREE = threeRef.current;
+    if (!model || !fragments || !readyRef.current) return;
+    try {
+      // limpa destaque anterior
+      await model.resetHighlight();
+      const ids = (highlightIds ?? []).filter((n) => Number.isFinite(n));
+      if (ids.length > 0) {
+        await model.highlight(ids, HL_MATERIAL);
+        // tenta enquadrar nos itens destacados
+        try {
+          const boxes = await model.getBoxes(ids);
+          if (boxes && boxes.length && world && THREE) {
+            const box = new THREE.Box3();
+            for (const b of boxes) box.union(b);
+            const sphere = box.getBoundingSphere(new THREE.Sphere());
+            if (sphere.radius > 0)
+              await world.camera.controls.fitToSphere(sphere, true);
+          }
+        } catch {
+          /* fit opcional */
+        }
+      }
+      await fragments.core.update(true);
+    } catch (e) {
+      // não derruba a UI por falha de destaque
+      console.warn("highlight falhou", e);
+    }
+  }
+
+  useEffect(() => {
+    void applyHighlight();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightIds]);
 
   return (
     <div className="relative h-[420px] w-full overflow-hidden rounded border border-slate-200 bg-slate-50">

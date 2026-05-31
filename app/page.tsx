@@ -21,6 +21,7 @@ interface BudgetItem {
   quantidade: number;
   criterio: string;
   estimado: boolean;
+  sourceIds: number[];
 }
 interface TypeSummary {
   tipo: string;
@@ -53,12 +54,17 @@ export default function Home() {
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [erro, setErro] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // item do orçamento atualmente destacado no viewer
+  const [highlightCodigo, setHighlightCodigo] = useState<string | null>(null);
+  const [highlightIds, setHighlightIds] = useState<number[]>([]);
 
   async function handleUpload(file: File) {
     setErro(null);
     setBusy(true);
     setResult(null);
     setPrices({});
+    setHighlightCodigo(null);
+    setHighlightIds([]);
     try {
       const ab = await file.arrayBuffer();
       setBytes(new Uint8Array(ab));
@@ -111,6 +117,17 @@ export default function Home() {
     () => (result ? result.items.reduce((s, it) => s + (prices[it.codigo] ?? 0) * it.quantidade, 0) : 0),
     [result, prices],
   );
+
+  // alterna o destaque dos objetos paramétricos de um item no viewer 3D
+  function toggleHighlight(it: BudgetItem) {
+    if (highlightCodigo === it.codigo) {
+      setHighlightCodigo(null);
+      setHighlightIds([]);
+    } else {
+      setHighlightCodigo(it.codigo);
+      setHighlightIds(it.sourceIds ?? []);
+    }
+  }
 
   // agrupa itens por etapa preservando ordem
   const grupos = useMemo(() => {
@@ -169,7 +186,7 @@ export default function Home() {
       {/* Visualizador 3D */}
       {bytes && (
         <div className="mb-6">
-          <IfcViewer bytes={bytes} />
+          <IfcViewer bytes={bytes} highlightIds={highlightIds} />
         </div>
       )}
 
@@ -216,6 +233,9 @@ export default function Home() {
                       prices={prices}
                       setPrices={setPrices}
                       fmt={fmt}
+                      hasViewer={!!bytes}
+                      highlightCodigo={highlightCodigo}
+                      onToggleHighlight={toggleHighlight}
                     />
                   ))}
                 </tbody>
@@ -273,12 +293,18 @@ function FragmentEtapa({
   prices,
   setPrices,
   fmt,
+  hasViewer,
+  highlightCodigo,
+  onToggleHighlight,
 }: {
   etapa: string;
   itens: BudgetItem[];
   prices: Record<string, number>;
   setPrices: (fn: (p: Record<string, number>) => Record<string, number>) => void;
   fmt: (n: number) => string;
+  hasViewer: boolean;
+  highlightCodigo: string | null;
+  onToggleHighlight: (it: BudgetItem) => void;
 }) {
   return (
     <>
@@ -289,12 +315,32 @@ function FragmentEtapa({
       </tr>
       {itens.map((it) => {
         const pu = prices[it.codigo] ?? 0;
+        const ativo = highlightCodigo === it.codigo;
+        const temObjetos = (it.sourceIds?.length ?? 0) > 0;
         return (
-          <tr key={it.codigo} className="border-b border-slate-100">
+          <tr
+            key={it.codigo}
+            className={"border-b border-slate-100 " + (ativo ? "bg-orange-50" : "")}
+          >
             <td className="py-1 pr-2 text-slate-400">{it.codigo}</td>
             <td className="py-1 pr-2">
               {it.descricao}
               {it.estimado && <span className="ml-1 text-xs text-amber-600">(estimado)</span>}
+              {hasViewer && temObjetos && (
+                <button
+                  type="button"
+                  onClick={() => onToggleHighlight(it)}
+                  title="Mostrar no modelo 3D os objetos paramétricos usados neste quantitativo"
+                  className={
+                    "ml-2 rounded border px-1.5 py-0.5 text-xs " +
+                    (ativo
+                      ? "border-orange-500 bg-orange-500 text-white"
+                      : "border-slate-300 text-slate-600 hover:bg-slate-50")
+                  }
+                >
+                  {ativo ? "● ocultar" : `◆ ver objetos (${it.sourceIds.length})`}
+                </button>
+              )}
             </td>
             <td className="py-1 pr-2 text-slate-500">{it.unidade}</td>
             <td className="py-1 pr-2 text-right">{fmt(it.quantidade)}</td>
