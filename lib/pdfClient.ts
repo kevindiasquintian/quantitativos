@@ -117,3 +117,46 @@ export async function renderPageToCanvas(
   // renderScale = pixels do canvas por unidade PDF (== scale da viewport).
   return { pdfWidth, pdfHeight, renderScale: viewport.scale };
 }
+
+/**
+ * Renderiza uma página num canvas fora de tela com largura-alvo (px) e devolve
+ * o ImageData + a escala usada. Útil para análise de pixels (flood-fill).
+ */
+export async function renderOffscreen(
+  fileData: ArrayBuffer | Uint8Array,
+  pageIndex: number,
+  targetWidth: number,
+): Promise<{ img: ImageData; scale: number; pdfWidth: number; pdfHeight: number }> {
+  const doc = await loadDocument(fileData);
+  const page = await doc.getPage(pageIndex + 1);
+  const base = page.getViewport({ scale: 1 });
+  const scale = targetWidth / base.width;
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Sem contexto 2D para render fora de tela.");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return { img, scale, pdfWidth: base.width, pdfHeight: base.height };
+}
+
+/** Texto com posição (em unidades PDF, origem inferior-esquerda) de uma página. */
+export async function getPageTextItems(
+  fileData: ArrayBuffer | Uint8Array,
+  pageIndex: number,
+): Promise<Array<{ text: string; x: number; y: number; w: number; h: number }>> {
+  const doc = await loadDocument(fileData);
+  const page = await doc.getPage(pageIndex + 1);
+  const tc = await page.getTextContent();
+  const out: Array<{ text: string; x: number; y: number; w: number; h: number }> = [];
+  for (const it of tc.items as Array<{ str?: string; transform?: number[]; width?: number; height?: number }>) {
+    if (typeof it.str !== "string" || !it.str.trim()) continue;
+    const t = it.transform ?? [1, 0, 0, 1, 0, 0];
+    out.push({ text: it.str, x: t[4], y: t[5], w: it.width ?? 0, h: it.height ?? 0 });
+  }
+  return out;
+}

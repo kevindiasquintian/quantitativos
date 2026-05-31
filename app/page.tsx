@@ -17,6 +17,7 @@ import HighlightOverlay, {
   type HighlightTarget,
 } from "@/components/HighlightOverlay";
 import { defaultPremissas } from "@/lib/premissas";
+import { quantifyByFloodFill } from "@/lib/floodfill";
 import type {
   ExtractionResult,
   ExportPayload,
@@ -118,6 +119,30 @@ export default function Home() {
       setResults(data.pages);
     } catch (e) {
       setErro("Falha ao processar: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  // ── Flood-fill: mede áreas da página ATUAL pelos recintos fechados ────────────
+  async function handleFloodFill() {
+    if (!arrayBuffer || !meta) return;
+    if (!Number.isFinite(metersPerUnit) || metersPerUnit <= 0) {
+      setErro("Defina uma escala válida antes de medir.");
+      return;
+    }
+    setErro(null);
+    setOcupado(true);
+    try {
+      const res = await quantifyByFloodFill(arrayBuffer, pageIndex, metersPerUnit);
+      setResults([res]);
+      if (res.rooms.length === 0) {
+        setErro(
+          "Flood-fill não encontrou recintos fechados nesta página (paredes abertas/vãos?).",
+        );
+      }
+    } catch (e) {
+      setErro("Falha no flood-fill: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setOcupado(false);
     }
@@ -238,6 +263,16 @@ export default function Home() {
             : pages.length > 1
               ? `Quantificar ${selectedPages.length} página(s)`
               : "Ler a página"}
+        </button>
+
+        <button
+          type="button"
+          onClick={handleFloodFill}
+          disabled={!docId || ocupado}
+          className="rounded bg-purple-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-40"
+          title="Mede áreas da página atual pelos recintos fechados (flood-fill)"
+        >
+          Medir áreas (pág. atual)
         </button>
 
         <button

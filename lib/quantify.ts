@@ -14,7 +14,6 @@ import type { Premissas } from "@/lib/premissas";
 import {
   segmentLengthUnits,
   toMeters,
-  // polygonAreaM2, // usado na reconstrucao por poligono (fora do MVP, ver comentario abaixo)
 } from "@/lib/geometry";
 
 /**
@@ -232,13 +231,31 @@ function isRoomName(text: string): boolean {
   return true;
 }
 
-/** Acha o nome de ambiente mais próximo de um rótulo de área. */
+/**
+ * Acha o nome do ambiente associado a um rótulo de área.
+ * Em tabelas de área (o caso comum), o nome está na MESMA LINHA, à esquerda do
+ * valor. Por isso priorizamos candidatos com y próximo e x menor, escolhendo o
+ * mais à esquerda (início da linha = nome do ambiente). Se não houver nada na
+ * linha, cai para o nome mais próximo por distância.
+ */
 function nearestName(areaItem: TextItem, texts: TextItem[]): string | null {
+  const rowTol = Math.max(8, (areaItem.height || 0) * 0.8);
+  const cands = texts.filter((t) => t !== areaItem && isRoomName(t.text));
+
+  // mesma linha, à esquerda do valor
+  const sameRow = cands.filter(
+    (t) => Math.abs(t.y - areaItem.y) <= rowTol && t.x < areaItem.x,
+  );
+  if (sameRow.length > 0) {
+    sameRow.sort((a, b) => a.x - b.x); // mais à esquerda = nome do ambiente
+    return sameRow[0].text.trim();
+  }
+
+  // fallback: mais próximo por distância euclidiana
   const origin: Point = { x: areaItem.x, y: areaItem.y };
   let best: TextItem | null = null;
   let bestDist = Infinity;
-  for (const t of texts) {
-    if (t === areaItem || !isRoomName(t.text)) continue;
+  for (const t of cands) {
     const d = dist(origin, { x: t.x, y: t.y });
     if (d < bestDist) {
       bestDist = d;
@@ -317,6 +334,10 @@ export function quantifyAuto(input: {
   }
   rooms.length = 0;
   rooms.push(...dedupRooms);
+
+  // NOTA: a detecção por geometria (lib/rooms.ts) foi testada e produz
+  // resultados não confiáveis em plantas reais (faces sobrepostas por paredes
+  // duplas/vãos de porta). Mantida desabilitada até termos um método melhor.
 
   // ----- PAREDES (estimativa pelo estilo dominante) -----
   // Agrupa traços longos por (cor|espessura) e escolhe o grupo de maior
