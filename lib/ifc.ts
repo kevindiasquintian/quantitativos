@@ -138,15 +138,15 @@ function fillFromGeometry(
       const wid = Math.min(prof.xdim, prof.ydim); // mm (espessura)
       const hgt = ex.depth; // mm (altura)
 
-      if (el.q.Length === undefined) el.q.Length = len;
-      if (el.q.Width === undefined) el.q.Width = wid;
-      if (el.q.Height === undefined) el.q.Height = hgt;
-      // Área de face (projeção lateral = comprimento × altura)
-      if (el.q.NetSideArea === undefined) el.q.NetSideArea = len * hgt;
-      // Volume (mm³ → será normalizado depois)
-      if (el.q.NetVolume === undefined) el.q.NetVolume = prof.xdim * prof.ydim * hgt;
-      // Para lajes/coberturas horizontais a "projeção" é len × wid (planta)
-      if (el.q.GrossFootprintArea === undefined) el.q.GrossFootprintArea = len * wid;
+      // Normaliza já para m / m² / m³ (mm → m).
+      if (el.q.Length === undefined) el.q.Length = len / 1000;
+      if (el.q.Width === undefined) el.q.Width = wid / 1000;
+      if (el.q.Height === undefined) el.q.Height = hgt / 1000;
+      if (el.q.NetSideArea === undefined) el.q.NetSideArea = (len * hgt) / 1e6;
+      if (el.q.NetVolume === undefined)
+        el.q.NetVolume = (prof.xdim * prof.ydim * hgt) / 1e9;
+      if (el.q.GrossFootprintArea === undefined)
+        el.q.GrossFootprintArea = (len * wid) / 1e6;
       break;
     }
   }
@@ -165,12 +165,11 @@ function derivedRoofFootprint(elements: Map<number, IfcElement>): number {
     if (l > 0) lengths.push(l);
   }
   if (lengths.length < 2) return 0;
-  // Encontra dois valores distintos de comprimento (as duas dimensões da casa).
+  // Comprimentos já em metros (geometry-filled). Encontra as duas dimensões.
   lengths.sort((a, b) => b - a);
   const l1 = lengths[0];
   const l2 = lengths.find((l) => Math.abs(l - l1) / l1 > 0.05) ?? l1;
-  // Converte mm → m e retorna produto (área projetada).
-  return (l1 / 1000) * (l2 / 1000);
+  return l1 * l2;
 }
 
 // ─── Parser principal ──────────────────────────────────────────────────────────
@@ -319,20 +318,7 @@ export function parseIfc(text: string): IfcParseResult {
     }
   }
 
-  // Normaliza as quantidades geométricas (que estão em mm / mm² / mm³).
-  for (const el of elements.values()) {
-    if (Object.keys(el.q).length === 0) continue;
-    for (const [k, v] of Object.entries(el.q)) {
-      if (k === "_roofFootprintM2") continue; // já em m²
-      let norm = v;
-      if (k.includes("Volume")) norm = v > 10000 ? v / 1e9 : v;
-      else if (k.includes("Area") || k.includes("area")) norm = v > 10000 ? v / 1e6 : v;
-      else if (k === "Length" || k === "Width" || k === "Height") norm = v > 10 ? v / 1000 : v;
-      el.q[k] = norm;
-    }
-  }
-
-  // Promove _roofFootprintM2 para GrossFootprintArea após normalização.
+  // Promove _roofFootprintM2 (já em m²) para GrossFootprintArea.
   for (const el of elements.values()) {
     if (el.q._roofFootprintM2 !== undefined) {
       el.q.GrossFootprintArea = el.q._roofFootprintM2;
